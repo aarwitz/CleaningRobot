@@ -9,6 +9,8 @@
 
 
 For controlling the waveshare roarm m2-s:
+cd ~/workspaces/isaac_ros-dev/src/RoArm-M2-S_python
+source ...
 (roarmpython-env) taylor@ubuntu:~/workspaces/isaac_ros-dev/src/RoArm-M2-S_python$ python serial_simple_ctrl.py /dev/ttyUSB0
 {"T":1041,"x":235,"y":0,"z":234,"t":3.14}
 Received: {"T":1041,"x":235,"y":0,"z":234,"t":3.14}
