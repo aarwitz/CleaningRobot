@@ -121,9 +121,10 @@ Close (example):
 
 Individually copyable JSON messages (click-copy friendly). Copy only the JSON line in each block.
 
-Init
-
-Init does not have a JSON in your list. Run your usual startup/init procedure here.
+Output telemetry
+'''json
+{"T":105}
+'''
 
 Initialize and home
 '''json
