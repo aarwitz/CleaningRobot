@@ -125,6 +125,11 @@ Init
 
 Init does not have a JSON in your list. Run your usual startup/init procedure here.
 
+Initialize and home
+'''json
+{"T":100}
+'''
+
 Open end effector
 
 ```json
