@@ -90,3 +90,47 @@ License / Attribution
 
 This README was cleaned for copy-paste use. Check repository files for original headers and licensing.
 
+## Example: Simple pick-and-place sequence
+
+Below is an 8-step example sequence (init, pick, move, rotate, place) expressed as single-line JSON messages you can send to the robot. All quotes are standard ASCII double quotes.
+
+Steps:
+
+1. Init
+2. Open end effector
+3. Go down to pick point
+4. Close end effector
+5. Move up (don't re-init)
+6. Rotate base before going down to place in bin
+7. Place in bin (move down)
+8. Open end effector
+
+Commands (single-line JSON messages):
+
+Open (example):
+```json
+{"T":106, "cmd":1.2, "spd":0, "acc":10}
+```
+
+Close (example):
+```json
+{"T":106, "cmd":3.14, "spd":0, "acc":10}
+```
+
+Full sequence (cleaned and with ASCII quotes):
+
+1. -- (human step: Init)
+2. {"T":106, "cmd":1.2, "spd":0, "acc":10}
+3. {"T":101, "joint":2, "rad":1.05, "spd":10, "acc":10}
+4. {"T":106, "cmd":3.14, "spd":50, "acc":20}
+5. {"T":102, "base":0.0, "shoulder":0.3, "elbow":1.2, "hand":3.12, "spd":15, "acc":10}
+6. {"T":101, "joint":1, "rad":1.0, "spd":15, "acc":10}
+7. -- (suggested place command: move down to bin)
+	Suggested: {"T":101, "joint":2, "rad":0.5, "spd":10, "acc":10}
+8. {"T":106, "cmd":1.2, "spd":20, "acc":10}
+
+Notes:
+- I fixed non-ASCII quotes and normalized speed/acc keys to numeric values.
+- Step 7 was left blank in your original; I added a suggested move-down JSON command — adjust joint/rad values for your bin location.
+
+
