@@ -129,6 +129,25 @@ Full sequence (single-line JSON messages you can copy/paste):
 {"T":106, "cmd":1.2, "spd":20, "acc":10}
 ```
 
+Labeled (each JSON preceded by a short title for readability — copy the JSON line only):
+
+```json
+// Open end effector
+{"T":106, "cmd":1.2, "spd":0, "acc":10}
+// Go down to pick point
+{"T":101, "joint":2, "rad":1.05, "spd":10, "acc":10}
+// Close end effector
+{"T":106, "cmd":3.14, "spd":50, "acc":20}
+// Move up (don't re-init)
+{"T":102, "base":0.0, "shoulder":0.3, "elbow":1.2, "hand":3.12, "spd":15, "acc":10}
+// Rotate base before going down to place in bin
+{"T":101, "joint":1, "rad":1.0, "spd":15, "acc":10}
+// Place in bin (move down)
+{"T":101, "joint":2, "rad":0.5, "spd":10, "acc":10}  // suggested place command: adjust rad for your bin
+// Open end effector
+{"T":106, "cmd":1.2, "spd":20, "acc":10}
+```
+
 Notes:
 - I fixed non-ASCII quotes and normalized speed/acc keys to numeric values.
 - Step 7 was left blank in your original; I added a suggested move-down JSON command — adjust joint/rad values for your bin location.
