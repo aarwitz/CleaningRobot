@@ -117,34 +117,53 @@ Close (example):
 {"T":106, "cmd":3.14, "spd":0, "acc":10}
 ```
 
-Full sequence (single-line JSON messages you can copy/paste):
+<!-- Removed combined block to avoid duplication; see individually copyable blocks below -->
+
+Individually copyable JSON messages (click-copy friendly). Copy only the JSON line in each block.
+
+Init
+
+Init does not have a JSON in your list. Run your usual startup/init procedure here.
+
+Open end effector
 
 ```json
 {"T":106, "cmd":1.2, "spd":0, "acc":10}
-{"T":101, "joint":2, "rad":1.05, "spd":10, "acc":10}
-{"T":106, "cmd":3.14, "spd":50, "acc":20}
-{"T":102, "base":0.0, "shoulder":0.3, "elbow":1.2, "hand":3.12, "spd":15, "acc":10}
-{"T":101, "joint":1, "rad":1.0, "spd":15, "acc":10}
-{"T":101, "joint":2, "rad":0.5, "spd":10, "acc":10}  // suggested place command: adjust rad for your bin
-{"T":106, "cmd":1.2, "spd":20, "acc":10}
 ```
 
-Labeled (each JSON preceded by a short title for readability — copy the JSON line only):
+Go down to pick point
 
 ```json
-// Open end effector
-{"T":106, "cmd":1.2, "spd":0, "acc":10}
-// Go down to pick point
 {"T":101, "joint":2, "rad":1.05, "spd":10, "acc":10}
-// Close end effector
+```
+
+Close end effector
+
+```json
 {"T":106, "cmd":3.14, "spd":50, "acc":20}
-// Move up (don't re-init)
+```
+
+Move up (don't re-init)
+
+```json
 {"T":102, "base":0.0, "shoulder":0.3, "elbow":1.2, "hand":3.12, "spd":15, "acc":10}
-// Rotate base before going down to place in bin
+```
+
+Rotate base before going down to place in bin
+
+```json
 {"T":101, "joint":1, "rad":1.0, "spd":15, "acc":10}
-// Place in bin (move down)
-{"T":101, "joint":2, "rad":0.5, "spd":10, "acc":10}  // suggested place command: adjust rad for your bin
-// Open end effector
+```
+
+Place in bin (move down)
+
+```json
+{"T":101, "joint":2, "rad":0.5, "spd":10, "acc":10}
+```
+
+Open end effector
+
+```json
 {"T":106, "cmd":1.2, "spd":20, "acc":10}
 ```
 
