@@ -117,17 +117,17 @@ Close (example):
 {"T":106, "cmd":3.14, "spd":0, "acc":10}
 ```
 
-Full sequence (cleaned and with ASCII quotes):
+Full sequence (single-line JSON messages you can copy/paste):
 
-1. -- (human step: Init)
-2. {"T":106, "cmd":1.2, "spd":0, "acc":10}
-3. {"T":101, "joint":2, "rad":1.05, "spd":10, "acc":10}
-4. {"T":106, "cmd":3.14, "spd":50, "acc":20}
-5. {"T":102, "base":0.0, "shoulder":0.3, "elbow":1.2, "hand":3.12, "spd":15, "acc":10}
-6. {"T":101, "joint":1, "rad":1.0, "spd":15, "acc":10}
-7. -- (suggested place command: move down to bin)
-	Suggested: {"T":101, "joint":2, "rad":0.5, "spd":10, "acc":10}
-8. {"T":106, "cmd":1.2, "spd":20, "acc":10}
+```json
+{"T":106, "cmd":1.2, "spd":0, "acc":10}
+{"T":101, "joint":2, "rad":1.05, "spd":10, "acc":10}
+{"T":106, "cmd":3.14, "spd":50, "acc":20}
+{"T":102, "base":0.0, "shoulder":0.3, "elbow":1.2, "hand":3.12, "spd":15, "acc":10}
+{"T":101, "joint":1, "rad":1.0, "spd":15, "acc":10}
+{"T":101, "joint":2, "rad":0.5, "spd":10, "acc":10}  // suggested place command: adjust rad for your bin
+{"T":106, "cmd":1.2, "spd":20, "acc":10}
+```
 
 Notes:
 - I fixed non-ASCII quotes and normalized speed/acc keys to numeric values.
