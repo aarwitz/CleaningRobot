@@ -60,6 +60,18 @@ Output telemetry
 {"T":105}
 ```
 
+Open end effector
+
+```json
+{"T":106, "cmd":1.2, "spd":0, "acc":10}
+```
+
+Output telemetry
+```json
+{"T":105}
+```
+
+
 Set LED by numeric value:
 
 ```json
@@ -116,51 +128,35 @@ Steps:
 
 Individually copyable JSON messages (click-copy friendly). Copy only the JSON line in each block.
 
-Initialize and home
+
+Starting point
+
 ```json
-{"T":100}
+{"T":102,"base":0.0,"shoulder":0.0,"elbow":1.35,"hand":3.14,"spd":0,"acc":20}
 ```
 
-Open end effector
+Go down to pick point and close end effector
 
 ```json
-{"T":106, "cmd":1.2, "spd":0, "acc":10}
+{"T":102,"base":0.0,"shoulder":1.0,"elbow":1.8,"hand":3.125,"spd":0,"acc":20}
 ```
 
-Go down to pick point
+Move up
 
 ```json
-{"T":101, "joint":2, "rad":1.05, "spd":10, "acc":10}
-```
-
-Close end effector
-
-```json
-{"T":106, "cmd":3.14, "spd":50, "acc":20}
-```
-
-Move up (don't re-init)
-
-```json
-{"T":102, "base":0.0, "shoulder":0.3, "elbow":1.2, "hand":3.12, "spd":15, "acc":10}
+{"T":102,"base":0.0,"shoulder":0.0,"elbow":1.5,"hand":3.14,"spd":0,"acc":20}
 ```
 
 Rotate base before going down to place in bin
 
 ```json
-{"T":101, "joint":1, "rad":1.0, "spd":15, "acc":10}
-```
-
-Place in bin (move down)
-
-```json
-{"T":101, "joint":2, "rad":0.5, "spd":10, "acc":10}
+{"T":102,"base":-1.20,"shoulder":0.0,"elbow":1.3,"hand":3.14,"spd":0,"acc":20}
 ```
 
 Open end effector
 
 ```json
-{"T":106, "cmd":1.2, "spd":20, "acc":10}
+{"T":106, "cmd":1.2, "spd":0, "acc":20}
 ```
 
 Notes:
