@@ -55,10 +55,9 @@ python serial_simple_ctrl.py /dev/ttyUSB0
 
 Use plain double quotes for JSON. These are single-line examples you can send to the robot over serial or a websocket depending on your setup.
 
-Set a timestamp-like value:
-
+Output telemetry
 ```json
-{"T":100}
+{"T":105}
 ```
 
 Set LED by numeric value:
@@ -84,7 +83,15 @@ LED on/off examples:
 Notes:
 
 - If you copy-paste JSON into terminals, ensure your program or script expects a JSON string and send it appropriately (e.g., as a line over a serial connection or as a message over a websocket).
-- The repository contains example scripts such as `serial_simple_ctrl.py` and `cleanest.py` in various folders. Inspect those scripts for expected message formats.
+- The repository contains an example script, `serial_simple_ctrl.py`, that connects to the RoArm over a serial port and sends JSON messages typed into the terminal (one JSON message per line).
+
+Usage example (replace device path as needed):
+
+```bash
+python serial_simple_ctrl.py /dev/ttyUSB0
+```
+
+After the script starts, type or paste a single-line JSON message and press Enter to send it to the robot.
 
 License / Attribution
 
@@ -105,31 +112,14 @@ Steps:
 7. Place in bin (move down)
 8. Open end effector
 
-Commands (single-line JSON messages):
-
-Open (example):
-```json
-{"T":106, "cmd":1.2, "spd":0, "acc":10}
-```
-
-Close (example):
-```json
-{"T":106, "cmd":3.14, "spd":0, "acc":10}
-```
-
 <!-- Removed combined block to avoid duplication; see individually copyable blocks below -->
 
 Individually copyable JSON messages (click-copy friendly). Copy only the JSON line in each block.
 
-Output telemetry
-'''json
-{"T":105}
-'''
-
 Initialize and home
-'''json
+```json
 {"T":100}
-'''
+```
 
 Open end effector
 
