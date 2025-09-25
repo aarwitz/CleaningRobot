@@ -15,14 +15,14 @@ except Exception:
     serial = None
 
 
-def make_sequence(pick_base, pick_shoulder, pick_elbow, pick_hand=3.125):
+def make_sequence(pick_base, pick_shoulder, pick_elbow, pick_hand=3.145):
     """Generate a sequence for a pick at the given joint values."""
     return [
         # (msg, delay_in_seconds)
         ({"T":102, "base":0.0, "shoulder":0.0, "elbow":1.35, "hand":0, "spd":0, "acc":20}, 1.0),  # Home
-        ({"T":102, "base":pick_base, "shoulder":0.8, "elbow":1.8, "hand":0, "spd":0, "acc":20}, 1.1),  # Above pick
-        ({"T":102, "base":pick_base, "shoulder":pick_shoulder, "elbow":pick_elbow, "hand":pick_hand, "spd":0, "acc":20}, 1.5),  # Pick
-        ({"T":102, "base":-1.465, "shoulder":0.0, "elbow":1.3, "hand":pick_hand, "spd":0, "acc":20}, 1.3),  # Above trash
+        ({"T":102, "base":pick_base, "shoulder":0.8, "elbow":1.8, "hand":0, "spd":0, "acc":20}, 1.3),  # Above pick
+        ({"T":102, "base":pick_base, "shoulder":pick_shoulder, "elbow":pick_elbow, "hand":pick_hand, "spd":0, "acc":20}, 1.8),  # Pick
+        ({"T":102, "base":-1.465, "shoulder":0.0, "elbow":1.3, "hand":pick_hand, "spd":0, "acc":20}, 1.5),  # Above trash
         ({"T":106, "cmd":1.2, "spd":0, "acc":20}, 1.5),  # Drop
     ]
 
@@ -32,11 +32,17 @@ RETURN_HOME_STEP = ({"T":102, "base":0.0, "shoulder":0.0, "elbow":1.35, "hand":0
 
 
 # Define multiple sequences by changing only the pick parameters
+# SEQUENCES = { #radians: base, shoulder, elbow
+#     "A": make_sequence(-0.2, 1.076, 1.75),    # Sequence A pick coords
+#     "B": make_sequence(-.6, 1.07, 1.79),  # Sequence C pick coords
+#     "C": make_sequence(0.43, 1.07, 1.75),   # Sequence D pick coords
+#     "D": make_sequence(1.82, 1.07, 1.82),   # Sequence B pick coords
+# }
 SEQUENCES = { #radians: base, shoulder, elbow
-    "A": make_sequence(-0.2, 1.076, 1.73),    # Sequence A pick coords
-    "B": make_sequence(-.6, 1.07, 1.78),  # Sequence C pick coords
-    "C": make_sequence(0.43, 1.07, 1.73),   # Sequence D pick coords
-    "D": make_sequence(1.82, 1.07, 1.8),   # Sequence B pick coords
+    "A": make_sequence(-0.1, 1.076, 1.85),    # Sequence A pick coords
+    "B": make_sequence(-.5, 1.07, 1.8),  # Sequence C pick coords
+    "C": make_sequence(0.54, 1.07, 1.84),   # Sequence D pick coords
+    "D": make_sequence(1.82, 1.07, 1.86),   # Sequence B pick coords
 }
 
 
@@ -126,7 +132,7 @@ if __name__ == '__main__':
                 {"T":102, "base": seq[pick_index][0].get('base', 0.0),
                  "shoulder": seq[pick_index][0].get('shoulder', 0.0) - 0.55,
                  "elbow": seq[pick_index][0].get('elbow', 0.0) - 0.3,
-                 "hand": seq[pick_index][0].get('hand', 3.125), "spd":0, "acc":20},
+                 "hand": seq[pick_index][0].get('hand', 3.145), "spd":0, "acc":20},
                 0.4,
             )
             # Insert after pick

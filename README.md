@@ -9,13 +9,13 @@ Below are clean, copy-paste friendly commands and examples. All commands use pla
 Change to the workspace subdirectory:
 
 ```bash
-cd workspaces/isaac_ros_ws/src/isaac_ros_common
+cd ~/workspaces/isaac_ros-dev/src/isaac_ros_common
 ```
 
 Run the development script (example):
 
 ```bash
-./scripts/run_dev.sh -d ~/workspaces/isaac_ros_ws -i ros2_humble.realsense
+./scripts/run_dev.sh -d ~/workspaces/isaac_ros-dev -i ros2_humble.realsense
 ```
 
 Add the ROS apt key (single command):
@@ -28,7 +28,56 @@ Update apt and install example Isaac ROS packages:
 
 ```bash
 sudo apt-get update
+```
+
+```bash
 sudo apt-get install -y ros-humble-isaac-ros-yolov8 ros-humble-isaac-ros-dnn-image-encoder ros-humble-isaac-ros-tensor-rt
+```
+
+```bash
+sudo apt-get install -y ros-humble-isaac-ros-examples ros-humble-isaac-ros-realsense
+```
+
+```bash
+pip install websockets
+```
+
+Run the launch file for RealSense
+```bash
+ros2 launch isaac_ros_examples isaac_ros_examples.launch.py launch_fragments:=realsense_mono_rect,yolov8 model_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/yolov8s.onnx engine_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/yolov8s.plan
+```
+
+If that doesn't work, start the container with extra options provided for any that may be wrong
+```bash
+docker run -it --rm --privileged --network host --ipc=host \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v "$HOME/.Xauthority":/home/admin/.Xauthority:rw \
+  -e DISPLAY \
+  -e NVIDIA_VISIBLE_DEVICES=all \
+  -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -e ROS_DOMAIN_ID -e USER -e ISAAC_ROS_WS=/workspaces/isaac_ros-dev \
+  -e HOST_USER_UID=$(id -u) -e HOST_USER_GID=$(id -g) \
+  --pid=host -v /dev/input:/dev/input \
+  -v /dev/bus/usb:/dev/bus/usb \
+  -v /home/taylor/workspaces/isaac_ros-dev:/workspaces/isaac_ros-dev \
+  --name isaac_ros_dev-aarch64-container \
+  --gpus all \
+  isaac_ros_dev-aarch64 /bin/bash
+```
+
+My model for dirt on wood floor
+```bash
+ros2 launch isaac_ros_examples isaac_ros_examples.launch.py launch_fragments:=realsense_mono_rect,yolov8    model_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/fixed.onnx engine_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/fixed.plan
+```
+
+In another terminal in same container run the YOLOv8 visualization script:
+```bash
+ros2 run isaac_ros_yolov8 isaac_ros_yolov8_visualizer.py
+```
+
+In another terminal in same container run my webviewer script:
+```bash
+python web_viewer.py
 ```
 
 ## RoArm M2-S (Waveshare) — serial control examples
@@ -42,7 +91,13 @@ cd ~/workspaces/isaac_ros-dev/src/RoArm-M2-S_python
 Activate the Python virtual environment (example name used in this repo):
 
 ```bash
-source roarmpython-env/bin/activate
+source ~/workspaces/isaac_ros-dev/src/RoArm-M2-S_python/roarmpython-env/bin/activate
+```
+
+Run the script with hardcoded sequences
+
+```bash
+python sequence_test_general.py /dev/ttyUSB0 --sequence A,B,C,D
 ```
 
 Run the serial control script (replace device path if needed):
@@ -129,16 +184,16 @@ Steps:
 Individually copyable JSON messages (click-copy friendly). Copy only the JSON line in each block.
 
 
-Starting point
+Starting point and open end effector
 
 ```json
-{"T":102,"base":0.0,"shoulder":0.0,"elbow":1.35,"hand":3.14,"spd":0,"acc":20}
+{"T":102,"base":0.0,"shoulder":0.0,"elbow":1.35,"hand":0,"spd":0,"acc":20}
 ```
 
 Go down to pick point and close end effector
 
 ```json
-{"T":102,"base":0.0,"shoulder":1.0,"elbow":1.8,"hand":3.125,"spd":0,"acc":20}
+{"T":102,"base":0.0,"shoulder":1.03,"elbow":1.8,"hand":3.125,"spd":0,"acc":20}
 ```
 
 Move up
@@ -147,7 +202,7 @@ Move up
 {"T":102,"base":0.0,"shoulder":0.0,"elbow":1.5,"hand":3.14,"spd":0,"acc":20}
 ```
 
-Rotate base before going down to place in bin
+Rotate base before placing
 
 ```json
 {"T":102,"base":-1.20,"shoulder":0.0,"elbow":1.3,"hand":3.14,"spd":0,"acc":20}
@@ -159,8 +214,10 @@ Open end effector
 {"T":106, "cmd":1.2, "spd":0, "acc":20}
 ```
 
+
 Notes:
 - I fixed non-ASCII quotes and normalized speed/acc keys to numeric values.
 - Step 7 was left blank in your original; I added a suggested move-down JSON command — adjust joint/rad values for your bin location.
+
 
 
