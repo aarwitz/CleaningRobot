@@ -1,10 +1,13 @@
 # CleaningRobot
 
-This repository contains scripts and notes for working with the Waveshare RoArm M2-S and some Isaac ROS hints.
+This repository contains scripts and notes for the main hardware pieces of my robot:
+- Intel RealSense in Isaac Ros environment
+- Waveshare RoArm M2-S 4 axis arm
+- HiWonder 4 wheel motor driver
 
 Below are clean, copy-paste friendly commands and examples. All commands use plain ASCII quotes and are given as single lines so you can run them one at a time in a terminal.
 
-## Isaac ROS / development helper commands
+## Isaac ROS / development helper commands for setting up vision system
 
 Change to the workspace subdirectory:
 
@@ -18,7 +21,25 @@ Run the development script (example):
 ./scripts/run_dev.sh -d ~/workspaces/isaac_ros-dev -i ros2_humble.realsense
 ```
 
-Add the ROS apt key (single command):
+If that doesn't work or can't exist GPU or camera in container, add options:
+```bash
+docker run -it --rm --privileged --network host --ipc=host \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v "$HOME/.Xauthority":/home/admin/.Xauthority:rw \
+  -e DISPLAY \
+  -e NVIDIA_VISIBLE_DEVICES=all \
+  -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -e ROS_DOMAIN_ID -e USER -e ISAAC_ROS_WS=/workspaces/isaac_ros-dev \
+  -e HOST_USER_UID=$(id -u) -e HOST_USER_GID=$(id -g) \
+  --pid=host -v /dev/input:/dev/input \
+  -v /dev/bus/usb:/dev/bus/usb \
+  -v /home/taylor/workspaces/isaac_ros-dev:/workspaces/isaac_ros-dev \
+  --name isaac_ros_dev-aarch64-container \
+  --gpus all \
+  isaac_ros_dev-aarch64 /bin/bash
+```
+
+Add the ROS apt key if needed:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | sudo gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg
@@ -47,24 +68,6 @@ Run the launch file for RealSense
 ros2 launch isaac_ros_examples isaac_ros_examples.launch.py launch_fragments:=realsense_mono_rect,yolov8 model_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/yolov8s.onnx engine_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/yolov8s.plan
 ```
 
-If that doesn't work, start the container with extra options provided for any that may be wrong
-```bash
-docker run -it --rm --privileged --network host --ipc=host \
-  -v /tmp/.X11-unix:/tmp/.X11-unix \
-  -v "$HOME/.Xauthority":/home/admin/.Xauthority:rw \
-  -e DISPLAY \
-  -e NVIDIA_VISIBLE_DEVICES=all \
-  -e NVIDIA_DRIVER_CAPABILITIES=all \
-  -e ROS_DOMAIN_ID -e USER -e ISAAC_ROS_WS=/workspaces/isaac_ros-dev \
-  -e HOST_USER_UID=$(id -u) -e HOST_USER_GID=$(id -g) \
-  --pid=host -v /dev/input:/dev/input \
-  -v /dev/bus/usb:/dev/bus/usb \
-  -v /home/taylor/workspaces/isaac_ros-dev:/workspaces/isaac_ros-dev \
-  --name isaac_ros_dev-aarch64-container \
-  --gpus all \
-  isaac_ros_dev-aarch64 /bin/bash
-```
-
 My model for dirt on wood floor
 ```bash
 ros2 launch isaac_ros_examples isaac_ros_examples.launch.py launch_fragments:=realsense_mono_rect,yolov8    model_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/fixed.onnx engine_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/fixed.plan
@@ -78,6 +81,41 @@ ros2 run isaac_ros_yolov8 isaac_ros_yolov8_visualizer.py
 In another terminal in same container run my webviewer script:
 ```bash
 python web_viewer.py
+```
+
+# GGCNN
+```bash
+docker exec -it <Isaac-ROS container ID> bash
+```
+
+```bash
+cd /workspaces/isaac_ros-dev/src
+```
+
+```bash
+git clone https://github.com/dougsm/ggcnn.git
+```
+
+```bash
+wget https://github.com/dougsm/ggcnn/releases/download/v0.1/ggcnn_weights_cornell.zip
+```
+
+```bash
+unzip ggcnn_weights_cornell.zip
+```
+
+In the Isaac Ros container to publish depth data
+```bash
+ros2 launch isaac_ros_examples isaac_ros_examples.launch.py launch_fragments:=realsense_depth_rect_depth_to_color
+```
+
+Confirm it launched
+```bash
+ros2 topic list
+```
+
+```bash
+python ggcnn_inference_ros2.py
 ```
 
 ## RoArm M2-S (Waveshare) — serial control examples
