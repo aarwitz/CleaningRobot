@@ -2,121 +2,588 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>YOLOv8 WebSocket Viewer</title>
+  <title>Enhanced YOLOv8 3D Viewer - Fixed</title>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; display:flex; flex-direction:column; align-items:center; padding:16px; background:#111; color:#eee; }
-    #canvasWrap { width: 90vw; max-width: 1280px; border:1px solid #333; background:#000; display:flex; justify-content:center; align-items:center; }
-    img { max-width:100%; height:auto; display:block; }
-    #status { margin-top:8px; font-size:14px; color:#ccc; }
-    #controls { margin-top:8px; }
-    button { margin-left:8px; }
+    body { 
+      font-family: system-ui, -apple-system, sans-serif; 
+      margin: 0; padding: 16px; 
+      background: #111; color: #eee; 
+    }
+    
+    .tabs {
+      display: flex;
+      margin-bottom: 16px;
+      border-bottom: 1px solid #333;
+    }
+    
+    .tab {
+      padding: 12px 24px;
+      background: #222;
+      color: #ccc;
+      cursor: pointer;
+      border: none;
+      border-bottom: 3px solid transparent;
+      margin-right: 4px;
+    }
+    
+    .tab.active {
+      background: #333;
+      color: #fff;
+      border-bottom-color: #0af;
+    }
+    
+    .tab-content {
+      display: none;
+      min-height: 600px;
+    }
+    
+    .tab-content.active {
+      display: block;
+    }
+    
+    #view2d {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    
+    #canvasWrap {
+      width: 90vw;
+      max-width: 1280px;
+      border: 1px solid #333;
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    
+    #frame {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+    
+    #view3d {
+      width: 100%;
+      height: 600px;
+      border: 1px solid #333;
+      background: #000;
+      position: relative;
+    }
+    
+    #threejs-container {
+      width: 100%;
+      height: 100%;
+    }
+    
+    .info-panel {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.8);
+      padding: 12px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+      max-width: 300px;
+      z-index: 100;
+    }
+    
+    .controls {
+      margin-top: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    
+    .controls input, .controls button {
+      padding: 8px 12px;
+      background: #333;
+      border: 1px solid #555;
+      color: #fff;
+      border-radius: 4px;
+    }
+    
+    .controls button:hover {
+      background: #444;
+    }
+    
+    .controls button:disabled {
+      background: #222;
+      color: #666;
+    }
+    
+    .status {
+      margin-top: 8px;
+      font-size: 14px;
+      color: #ccc;
+    }
+
+    .debug-info {
+      margin-top: 16px;
+      padding: 12px;
+      background: #222;
+      border: 1px solid #333;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 11px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
   </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 </head>
 <body>
-  <h2>YOLOv8 Viewer</h2>
-  <div id="canvasWrap">
-    <img id="frame" alt="Waiting for frames..." />
+  <h2>Enhanced YOLOv8 3D Object Detection Viewer - Fixed</h2>
+  
+  <div class="tabs">
+    <button class="tab active" data-tab="2d">2D Detection</button>
+    <button class="tab" data-tab="3d">3D Point Cloud</button>
   </div>
-
-  <div id="status">Connecting...</div>
-  <div id="controls">
-    <label for="host">WebSocket URL:</label>
-    <input id="host" type="text" value="ws://localhost:8765" style="width:300px" />
-    <button id="connect">Connect</button>
-    <button id="disconnect" disabled>Disconnect</button>
-    <span style="margin-left:16px">FPS: <span id="fps">0</span></span>
+  
+  <!-- 2D View Tab -->
+  <div id="view2d" class="tab-content active">
+    <div id="canvasWrap">
+      <img id="frame" alt="Waiting for frames..." />
+    </div>
+    
+    <div class="controls">
+      <label>WebSocket URL:</label>
+      <input id="host2d" type="text" value="ws://100.110.118.74:8765/2d" style="width:300px" />
+      <button id="connect2d">Connect 2D</button>
+      <button id="disconnect2d" disabled>Disconnect</button>
+      <span>FPS: <span id="fps2d">0</span></span>
+    </div>
+    
+    <div class="status" id="status2d">Ready to connect...</div>
+  </div>
+  
+  <!-- 3D View Tab -->
+  <div id="view3d" class="tab-content">
+    <div id="threejs-container"></div>
+    <div class="info-panel" id="info-panel">
+      <div><strong>3D Point Cloud Viewer</strong></div>
+      <div id="point-count">Points: 0</div>
+      <div id="detection-info">No detections</div>
+      <div id="connection-status">🔴 Disconnected</div>
+      <div style="margin-top: 8px; font-size: 10px; color: #888;">
+        Mouse: Rotate | Wheel: Zoom | Right-click: Pan
+      </div>
+    </div>
+    
+    <div class="controls">
+      <label>3D URL:</label>
+      <input id="host3d" type="text" value="ws://100.110.118.74:8765/3d" style="width:250px" />
+      <button id="connect3d">Connect 3D</button>
+      <button id="disconnect3d" disabled>Disconnect</button>
+      <br>
+      <label>Metadata URL:</label>
+      <input id="hostMeta" type="text" value="ws://100.110.118.74:8765/metadata" style="width:250px" />
+      <button id="connectMeta">Connect Metadata</button>
+      <button id="disconnectMeta" disabled>Disconnect</button>
+      <br>
+      <button id="reset-view">Reset View</button>
+      <label><input type="checkbox" id="show-axes" checked> Show Axes</label>
+      <span>Updates: <span id="update-count">0</span></span>
+    </div>
+    
+    <div class="status" id="status3d">Ready to connect...</div>
+    
+    <div class="debug-info" id="debug-info">
+      <div><strong>Debug Log:</strong></div>
+      <div id="debug-log"></div>
+    </div>
   </div>
 
   <script>
-    const img = document.getElementById('frame');
-    const status = document.getElementById('status');
-    const fpsEl = document.getElementById('fps');
-    const hostInput = document.getElementById('host');
-    const connectBtn = document.getElementById('connect');
-    const disconnectBtn = document.getElementById('disconnect');
-
-    let ws = null;
-    let lastTime = performance.now();
-    let frameCount = 0;
-    let lastFpsUpdate = performance.now();
-
-    function updateFPS() {
-      const now = performance.now();
-      frameCount++;
-      if (now - lastFpsUpdate >= 500) {
-        const fps = Math.round((frameCount * 1000) / (now - lastFpsUpdate));
-        fpsEl.textContent = fps;
-        frameCount = 0;
-        lastFpsUpdate = now;
+    // Debug logging
+    function debugLog(message) {
+      const log = document.getElementById('debug-log');
+      const timestamp = new Date().toLocaleTimeString();
+      log.innerHTML = `[${timestamp}] ${message}<br>` + log.innerHTML;
+      
+      // Keep only last 20 entries
+      const lines = log.innerHTML.split('<br>');
+      if (lines.length > 20) {
+        log.innerHTML = lines.slice(0, 20).join('<br>');
       }
     }
 
-    function connect(url) {
-      if (ws) ws.close();
-      status.textContent = `Connecting to ${url}...`;
-      ws = new WebSocket(url);
-      ws.binaryType = 'arraybuffer';  // receive binary frames
+    // Tab switching
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const targetTab = tab.dataset.tab;
+        
+        // Update tab buttons
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        
+        // Update tab content
+        document.querySelectorAll('.tab-content').forEach(content => {
+          content.classList.remove('active');
+        });
+        document.getElementById(`view${targetTab}`).classList.add('active');
+        
+        // Initialize 3D scene if switching to 3D tab
+        if (targetTab === '3d' && !window.scene) {
+          init3DScene();
+        }
+      });
+    });
 
-      ws.onopen = () => {
-        status.textContent = 'Connected';
-        connectBtn.disabled = true;
-        disconnectBtn.disabled = false;
+    // 2D Streaming (existing code)
+    const img = document.getElementById('frame');
+    const status2d = document.getElementById('status2d');
+    const fps2dEl = document.getElementById('fps2d');
+    const host2dInput = document.getElementById('host2d');
+    const connect2dBtn = document.getElementById('connect2d');
+    const disconnect2dBtn = document.getElementById('disconnect2d');
+
+    let ws2d = null;
+    let frameCount2d = 0;
+    let lastFpsUpdate2d = performance.now();
+
+    function updateFPS2D() {
+      const now = performance.now();
+      frameCount2d++;
+      if (now - lastFpsUpdate2d >= 500) {
+        const fps = Math.round((frameCount2d * 1000) / (now - lastFpsUpdate2d));
+        fps2dEl.textContent = fps;
+        frameCount2d = 0;
+        lastFpsUpdate2d = now;
+      }
+    }
+
+    function connect2D(url) {
+      if (ws2d) ws2d.close();
+      status2d.textContent = `Connecting to ${url}...`;
+      debugLog(`Connecting to 2D stream: ${url}`);
+      ws2d = new WebSocket(url);
+      ws2d.binaryType = 'arraybuffer';
+
+      ws2d.onopen = () => {
+        status2d.textContent = 'Connected to 2D stream';
+        connect2dBtn.disabled = true;
+        disconnect2dBtn.disabled = false;
+        debugLog('2D WebSocket connected');
       };
 
-      ws.onmessage = (evt) => {
-        // evt.data is an ArrayBuffer (binaryType=arraybuffer)
-        // wrap in a Blob and set img.src to an object URL
+      ws2d.onmessage = (evt) => {
         try {
-          const blob = new Blob([evt.data], { type: 'image/jpeg' });
-          const url = URL.createObjectURL(blob);
-
-          // replace image and revoke old URL after it loads
-          const oldUrl = img.src;
-          img.onload = () => {
-            updateFPS();
-            if (oldUrl && oldUrl.startsWith('blob:')) {
-              URL.revokeObjectURL(oldUrl);
-            }
-            img.onload = null;
-          };
-          img.src = url;
+          if (evt.data.byteLength > 0) {
+            const blob = new Blob([evt.data], { type: 'image/jpeg' });
+            const url = URL.createObjectURL(blob);
+            const oldUrl = img.src;
+            img.onload = () => {
+              updateFPS2D();
+              if (oldUrl && oldUrl.startsWith('blob:')) {
+                URL.revokeObjectURL(oldUrl);
+              }
+              img.onload = null;
+            };
+            img.src = url;
+          }
         } catch (e) {
-          console.error('Failed to render frame', e);
+          debugLog(`2D frame error: ${e.message}`);
         }
       };
 
-      ws.onclose = (e) => {
-        status.textContent = `Disconnected (${e.code})`;
-        connectBtn.disabled = false;
-        disconnectBtn.disabled = true;
-        // auto-reconnect after short delay
-        setTimeout(() => {
-          status.textContent = 'Reconnecting...';
-          connect(hostInput.value);
-        }, 1500);
+      ws2d.onclose = (e) => {
+        status2d.textContent = `Disconnected (${e.code})`;
+        connect2dBtn.disabled = false;
+        disconnect2dBtn.disabled = true;
+        debugLog(`2D WebSocket closed: ${e.code}`);
       };
 
-      ws.onerror = (err) => {
-        console.error('WebSocket error', err);
-        status.textContent = 'WebSocket error (check server / console)';
+      ws2d.onerror = (err) => {
+        debugLog(`2D WebSocket error: ${err}`);
+        status2d.textContent = 'WebSocket error';
       };
     }
 
-    connectBtn.onclick = () => connect(hostInput.value);
-    disconnectBtn.onclick = () => {
-      if (ws) {
-        ws.onclose = null;
-        ws.close();
-        ws = null;
-        status.textContent = 'Manual disconnect';
-        connectBtn.disabled = false;
-        disconnectBtn.disabled = true;
+    // 3D Scene Setup
+    let scene, camera, renderer, controls, pointCloud;
+    let axesHelper;
+
+    function init3DScene() {
+      const container = document.getElementById('threejs-container');
+      
+      // Scene
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x111111);
+
+      // Camera
+      camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.01, 100);
+      camera.position.set(0.5, 0.5, 1);
+
+      // Renderer
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      container.appendChild(renderer.domElement);
+
+      // Controls
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+      controls.target.set(0, 0, 0.3);
+
+      // Axes helper
+      axesHelper = new THREE.AxesHelper(0.2);
+      scene.add(axesHelper);
+
+      // Grid
+      const gridHelper = new THREE.GridHelper(1, 20, 0x444444, 0x222222);
+      gridHelper.rotateX(Math.PI / 2);
+      gridHelper.position.z = 0;
+      scene.add(gridHelper);
+
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+      scene.add(ambientLight);
+      
+      const pointLight = new THREE.PointLight(0xffffff, 0.5);
+      pointLight.position.set(1, 1, 1);
+      scene.add(pointLight);
+
+      // Handle resize
+      window.addEventListener('resize', () => {
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+      });
+
+      // Start render loop
+      animate();
+      
+      window.scene = scene; // Mark as initialized
+      debugLog('3D scene initialized');
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      if (controls) controls.update();
+      if (renderer && scene && camera) {
+        renderer.render(scene, camera);
+      }
+    }
+
+    let updateCounter = 0;
+    function updatePointCloud(pointData) {
+      try {
+        debugLog(`Received point cloud data: ${pointData.length} bytes`);
+        
+        const data = JSON.parse(pointData);
+        debugLog(`Parsed ${data.num_points} points`);
+        
+        // Remove existing point cloud
+        if (pointCloud) {
+          scene.remove(pointCloud);
+          pointCloud.geometry.dispose();
+          pointCloud.material.dispose();
+        }
+
+        if (data.points && data.points.length > 0) {
+          const geometry = new THREE.BufferGeometry();
+          
+          // Set positions
+          const positions = new Float32Array(data.points);
+          geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          
+          // Set colors if available
+          if (data.colors && data.colors.length > 0) {
+            const colors = new Float32Array(data.colors);
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+          }
+
+          // Create point cloud material
+          const material = new THREE.PointsMaterial({
+            size: 0.005,
+            vertexColors: data.colors && data.colors.length > 0,
+            color: data.colors && data.colors.length > 0 ? undefined : 0x00ff00
+          });
+
+          pointCloud = new THREE.Points(geometry, material);
+          scene.add(pointCloud);
+
+          // Update info panel
+          document.getElementById('point-count').textContent = `Points: ${data.num_points}`;
+          document.getElementById('connection-status').textContent = '🟢 Connected';
+          
+          updateCounter++;
+          document.getElementById('update-count').textContent = updateCounter;
+          
+          debugLog(`Point cloud updated with ${data.num_points} points`);
+        } else {
+          document.getElementById('point-count').textContent = 'Points: 0';
+          debugLog('No points in received data');
+        }
+      } catch (e) {
+        debugLog(`Point cloud update error: ${e.message}`);
+        console.error('Failed to update point cloud', e);
+      }
+    }
+
+    // Metadata handling
+    let latestMetadata = null;
+    function updateMetadata(metadataString) {
+      try {
+        debugLog(`Received metadata: ${metadataString.length} bytes`);
+        
+        const data = JSON.parse(metadataString);
+        latestMetadata = data;
+        
+        if (Array.isArray(data) && data.length > 0) {
+          const detection = data[0]; // Show first detection
+          document.getElementById('detection-info').innerHTML = 
+            `<strong>${detection.class_name}</strong><br>` +
+            `Conf: ${(detection.confidence * 100).toFixed(1)}%<br>` +
+            `3D: (${detection.position_3d.map(v => v.toFixed(3)).join(', ')})m<br>` +
+            `Depth: ${detection.depth_mm}mm<br>` +
+            `Points: ${detection.num_points}`;
+          
+          debugLog(`Detection: ${detection.class_name} at ${detection.position_3d.map(v => v.toFixed(3)).join(',')}`);
+        } else {
+          document.getElementById('detection-info').textContent = 'No detections';
+        }
+      } catch (e) {
+        debugLog(`Metadata parse error: ${e.message}`);
+        console.error('Failed to parse metadata', e);
+      }
+    }
+
+    // 3D WebSocket connections
+    let ws3d = null;
+    let wsMeta = null;
+    const status3d = document.getElementById('status3d');
+    const host3dInput = document.getElementById('host3d');
+    const hostMetaInput = document.getElementById('hostMeta');
+    const connect3dBtn = document.getElementById('connect3d');
+    const disconnect3dBtn = document.getElementById('disconnect3d');
+    const connectMetaBtn = document.getElementById('connectMeta');
+    const disconnectMetaBtn = document.getElementById('disconnectMeta');
+    const resetViewBtn = document.getElementById('reset-view');
+    const showAxesCheckbox = document.getElementById('show-axes');
+
+    function connect3D(url) {
+      if (ws3d) ws3d.close();
+      status3d.textContent = `Connecting to 3D: ${url}...`;
+      debugLog(`Connecting to 3D stream: ${url}`);
+      ws3d = new WebSocket(url);
+      ws3d.binaryType = 'arraybuffer';
+
+      ws3d.onopen = () => {
+        status3d.textContent = 'Connected to 3D stream';
+        connect3dBtn.disabled = true;
+        disconnect3dBtn.disabled = false;
+        debugLog('3D WebSocket connected');
+      };
+
+      ws3d.onmessage = (evt) => {
+        try {
+          if (evt.data.byteLength > 0) {
+            const pointData = new TextDecoder().decode(evt.data);
+            updatePointCloud(pointData);
+          }
+        } catch (e) {
+          debugLog(`3D data error: ${e.message}`);
+        }
+      };
+
+      ws3d.onclose = (e) => {
+        status3d.textContent = `3D Disconnected (${e.code})`;
+        connect3dBtn.disabled = false;
+        disconnect3dBtn.disabled = true;
+        document.getElementById('connection-status').textContent = '🔴 Disconnected';
+        debugLog(`3D WebSocket closed: ${e.code}`);
+      };
+
+      ws3d.onerror = (err) => {
+        debugLog(`3D WebSocket error: ${err}`);
+      };
+    }
+
+    function connectMetadata(url) {
+      if (wsMeta) wsMeta.close();
+      debugLog(`Connecting to metadata stream: ${url}`);
+      wsMeta = new WebSocket(url);
+      wsMeta.binaryType = 'arraybuffer';
+
+      wsMeta.onopen = () => {
+        connectMetaBtn.disabled = true;
+        disconnectMetaBtn.disabled = false;
+        debugLog('Metadata WebSocket connected');
+      };
+
+      wsMeta.onmessage = (evt) => {
+        try {
+          if (evt.data.byteLength > 0) {
+            const metadataString = new TextDecoder().decode(evt.data);
+            updateMetadata(metadataString);
+          }
+        } catch (e) {
+          debugLog(`Metadata error: ${e.message}`);
+        }
+      };
+
+      wsMeta.onclose = (e) => {
+        connectMetaBtn.disabled = false;
+        disconnectMetaBtn.disabled = true;
+        debugLog(`Metadata WebSocket closed: ${e.code}`);
+      };
+
+      wsMeta.onerror = (err) => {
+        debugLog(`Metadata WebSocket error: ${err}`);
+      };
+    }
+
+    // Event listeners
+    connect2dBtn.onclick = () => connect2D(host2dInput.value);
+    disconnect2dBtn.onclick = () => {
+      if (ws2d) {
+        ws2d.close();
+        ws2d = null;
       }
     };
 
-    // auto connect on page load to default
-    window.addEventListener('load', () => connect(hostInput.value));
+    connect3dBtn.onclick = () => connect3D(host3dInput.value);
+    disconnect3dBtn.onclick = () => {
+      if (ws3d) {
+        ws3d.close();
+        ws3d = null;
+      }
+    };
+
+    connectMetaBtn.onclick = () => connectMetadata(hostMetaInput.value);
+    disconnectMetaBtn.onclick = () => {
+      if (wsMeta) {
+        wsMeta.close();
+        wsMeta = null;
+      }
+    };
+
+    resetViewBtn.onclick = () => {
+      if (camera && controls) {
+        camera.position.set(0.5, 0.5, 1);
+        controls.target.set(0, 0, 0.3);
+        controls.update();
+        debugLog('Camera view reset');
+      }
+    };
+
+    showAxesCheckbox.onchange = () => {
+      if (axesHelper) {
+        axesHelper.visible = showAxesCheckbox.checked;
+        debugLog(`Axes ${showAxesCheckbox.checked ? 'shown' : 'hidden'}`);
+      }
+    };
+
+    // Auto-connect on load
+    window.addEventListener('load', () => {
+      connect2D(host2dInput.value);
+      debugLog('Page loaded, auto-connecting 2D');
+    });
   </script>
 </body>
 </html>
-
