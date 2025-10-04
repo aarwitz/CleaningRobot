@@ -1,0 +1,122 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>YOLOv8 WebSocket Viewer</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; display:flex; flex-direction:column; align-items:center; padding:16px; background:#111; color:#eee; }
+    #canvasWrap { width: 90vw; max-width: 1280px; border:1px solid #333; background:#000; display:flex; justify-content:center; align-items:center; }
+    img { max-width:100%; height:auto; display:block; }
+    #status { margin-top:8px; font-size:14px; color:#ccc; }
+    #controls { margin-top:8px; }
+    button { margin-left:8px; }
+  </style>
+</head>
+<body>
+  <h2>YOLOv8 Viewer</h2>
+  <div id="canvasWrap">
+    <img id="frame" alt="Waiting for frames..." />
+  </div>
+
+  <div id="status">Connecting...</div>
+  <div id="controls">
+    <label for="host">WebSocket URL:</label>
+    <input id="host" type="text" value="ws://localhost:8765" style="width:300px" />
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <span style="margin-left:16px">FPS: <span id="fps">0</span></span>
+  </div>
+
+  <script>
+    const img = document.getElementById('frame');
+    const status = document.getElementById('status');
+    const fpsEl = document.getElementById('fps');
+    const hostInput = document.getElementById('host');
+    const connectBtn = document.getElementById('connect');
+    const disconnectBtn = document.getElementById('disconnect');
+
+    let ws = null;
+    let lastTime = performance.now();
+    let frameCount = 0;
+    let lastFpsUpdate = performance.now();
+
+    function updateFPS() {
+      const now = performance.now();
+      frameCount++;
+      if (now - lastFpsUpdate >= 500) {
+        const fps = Math.round((frameCount * 1000) / (now - lastFpsUpdate));
+        fpsEl.textContent = fps;
+        frameCount = 0;
+        lastFpsUpdate = now;
+      }
+    }
+
+    function connect(url) {
+      if (ws) ws.close();
+      status.textContent = `Connecting to ${url}...`;
+      ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';  // receive binary frames
+
+      ws.onopen = () => {
+        status.textContent = 'Connected';
+        connectBtn.disabled = true;
+        disconnectBtn.disabled = false;
+      };
+
+      ws.onmessage = (evt) => {
+        // evt.data is an ArrayBuffer (binaryType=arraybuffer)
+        // wrap in a Blob and set img.src to an object URL
+        try {
+          const blob = new Blob([evt.data], { type: 'image/jpeg' });
+          const url = URL.createObjectURL(blob);
+
+          // replace image and revoke old URL after it loads
+          const oldUrl = img.src;
+          img.onload = () => {
+            updateFPS();
+            if (oldUrl && oldUrl.startsWith('blob:')) {
+              URL.revokeObjectURL(oldUrl);
+            }
+            img.onload = null;
+          };
+          img.src = url;
+        } catch (e) {
+          console.error('Failed to render frame', e);
+        }
+      };
+
+      ws.onclose = (e) => {
+        status.textContent = `Disconnected (${e.code})`;
+        connectBtn.disabled = false;
+        disconnectBtn.disabled = true;
+        // auto-reconnect after short delay
+        setTimeout(() => {
+          status.textContent = 'Reconnecting...';
+          connect(hostInput.value);
+        }, 1500);
+      };
+
+      ws.onerror = (err) => {
+        console.error('WebSocket error', err);
+        status.textContent = 'WebSocket error (check server / console)';
+      };
+    }
+
+    connectBtn.onclick = () => connect(hostInput.value);
+    disconnectBtn.onclick = () => {
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+        ws = null;
+        status.textContent = 'Manual disconnect';
+        connectBtn.disabled = false;
+        disconnectBtn.disabled = true;
+      }
+    };
+
+    // auto connect on page load to default
+    window.addEventListener('load', () => connect(hostInput.value));
+  </script>
+</body>
+</html>
+
