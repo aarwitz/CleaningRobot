@@ -85,6 +85,9 @@ python web_viewer.py
 
 And then on a client (I am just using my mac laptop) open up viewer.html and input (ws://192.168.1.160:8765) then click Connect.
 
+Remember, to publish depth topics from realsense2_camera for this yolov8 demo, you can set enable_depth as true in /opt/ros/humble/share/isaac_ros_realsense/config/realsense_mono.yaml.
+https://forums.developer.nvidia.com/t/how-to-publish-depth-topics-along-with-yolov8-object-detection-on-jetson-orin-nano/305624
+
 # GGCNN
 ```bash
 docker exec -it <Isaac-ROS container ID> bash
