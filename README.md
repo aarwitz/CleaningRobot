@@ -83,6 +83,8 @@ In another terminal in same container run my webviewer script:
 python web_viewer.py
 ```
 
+And then on a client (I am just using my mac laptop) open up viewer.html and input (ws://192.168.1.160:8765) then click Connect.
+
 # GGCNN
 ```bash
 docker exec -it <Isaac-ROS container ID> bash
