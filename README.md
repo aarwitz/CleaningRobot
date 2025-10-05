@@ -65,12 +65,12 @@ pip install websockets
 
 Run the launch file for RealSense
 ```bash
-ros2 launch isaac_ros_examples isaac_ros_examples.launch.py launch_fragments:=realsense_mono_rect,yolov8 model_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/yolov8s.onnx engine_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/yolov8s.plan
+ros2 launch isaac_ros_examples isaac_ros_examples.launch.py launch_fragments:=realsense_mono_rect_depth,yolov8 model_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/yolov8s.onnx engine_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/yolov8s.plan
 ```
 
 My model for dirt on wood floor
 ```bash
-ros2 launch isaac_ros_examples isaac_ros_examples.launch.py launch_fragments:=realsense_mono_rect,yolov8    model_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/fixed.onnx engine_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/fixed.plan
+ros2 launch isaac_ros_examples isaac_ros_examples.launch.py launch_fragments:=realsense_mono_rect_depth,yolov8    model_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/fixed.onnx engine_file_path:=${ISAAC_ROS_WS}/isaac_ros_assets/models/yolov8/fixed.plan
 ```
 
 In another terminal in same container run the YOLOv8 visualization script:
@@ -78,9 +78,14 @@ In another terminal in same container run the YOLOv8 visualization script:
 ros2 run isaac_ros_yolov8 isaac_ros_yolov8_visualizer.py
 ```
 
+In another terminal in same container run my 3d detector:
+```bash
+python /workspaces/isaac_ros-dev/src/isaac_ros_object_detection/isaac_ros_yolov8/scripts/yolov8_3d_detector.py
+```
+
 In another terminal in same container run my webviewer script:
 ```bash
-python web_viewer.py
+python /workspaces/isaac_ros-dev/src/isaac_ros_object_detection/isaac_ros_yolov8/scripts/web_viewer_server_3d.py
 ```
 
 And then on a client (I am just using my mac laptop) open up viewer.html and input (ws://192.168.1.160:8765) then click Connect.
