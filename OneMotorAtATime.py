@@ -21,8 +21,12 @@ class EncoderMotorController:
     def __init__(self, i2c_port, motor_type=3):
         self.i2c_port = i2c_port
         with smbus2.SMBus(self.i2c_port) as bus:
+            # Write motor type
             bus.write_i2c_block_data(ENCODER_MOTOR_MODULE_ADDRESS, 20, [motor_type, ])
-    
+            time.sleep(0.01)
+            bus.write_i2c_block_data(ENCODER_MOTOR_MODULE_ADDRESS, 21,  [0,])  # reg 21 <- 0x01
+            time.sleep(0.01)
+
     def set_speed(self, motor_id, speed):
         """
         Simplified: ONLY individual motor control (like ClaudeAttemptOneMotor.py)
@@ -32,6 +36,8 @@ class EncoderMotorController:
         with smbus2.SMBus(self.i2c_port) as bus:
             try:
                 if 0 < motor_id <= 4:
+                    if motor_id in [3, 4]: # motors 3 and 4 need reversed direction
+                        speed = speed*-1
                     bus.write_i2c_block_data(ENCODER_MOTOR_MODULE_ADDRESS, 50 + motor_id, [speed, ])
                 else:
                     raise ValueError("Invalid motor id")
@@ -47,7 +53,7 @@ if __name__ == "__main__":
     print(f"Using I2C bus {I2C_BUS}")
     print("=" * 60)
     
-    test_speed = 40
+    test_speed = 50
     
     # Test each motor in sequence
     for motor_id in range(1, 5):
@@ -55,14 +61,14 @@ if __name__ == "__main__":
         print(f"  Starting motor {motor_id} at speed {test_speed}...")
         motor_controller.set_speed(motor_id, test_speed)
         
-        # Let it run for 2 seconds
-        time.sleep(2.0)
+        # Let it run for 5 seconds
+        time.sleep(5.0)
         
         print(f"  Stopping motor {motor_id}...")
         motor_controller.set_speed(motor_id, 0)
         
-        # Wait 1 second before next motor
-        time.sleep(1.0)
+        # Wait 2 seconds before next motor
+        time.sleep(2.0)
     
     print("\n" + "=" * 60)
     print("All motors tested! Complete!")
