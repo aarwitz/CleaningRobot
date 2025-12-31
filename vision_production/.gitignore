@@ -1,0 +1,15 @@
+# Models (too large for git)
+models/*.onnx
+models/*.plan
+
+# Logs
+*.txt
+session_log.txt
+cleaned_log.txt
+
+# Docker
+.env
+
+# Python
+__pycache__/
+*.pyc

@@ -1,0 +1,6 @@
+# Place your model files here:
+# - yolov8s.onnx
+# - yolov8s.plan
+#
+# These files are typically large and should be obtained from your model training
+# or downloaded from the appropriate source.
