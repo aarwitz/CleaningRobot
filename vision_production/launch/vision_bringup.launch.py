@@ -21,6 +21,7 @@ def generate_launch_description():
 
     confidence_threshold = LaunchConfiguration('confidence_threshold')
     nms_threshold = LaunchConfiguration('nms_threshold')
+    num_classes = LaunchConfiguration('num_classes')
 
     container = ComposableNodeContainer(
         name='vision_container',
@@ -65,6 +66,7 @@ def generate_launch_description():
                     'tensor_name': 'output_tensor',
                     'confidence_threshold': confidence_threshold,
                     'nms_threshold': nms_threshold,
+                    'num_classes': num_classes,
                 }],
             ),
         ],
@@ -102,10 +104,11 @@ def generate_launch_description():
         DeclareLaunchArgument('cam_h', default_value='720'),
         DeclareLaunchArgument('net_w', default_value='640'),
         DeclareLaunchArgument('net_h', default_value='640'),
-        DeclareLaunchArgument('model_file_path', default_value='/models/yolov8s.onnx'),
-        DeclareLaunchArgument('engine_file_path', default_value='/models/yolov8s.plan'),
+        DeclareLaunchArgument('model_file_path', default_value='/models/socks2.onnx'),
+        DeclareLaunchArgument('engine_file_path', default_value='/models/socks2.plan'),
         DeclareLaunchArgument('confidence_threshold', default_value='0.25'),
         DeclareLaunchArgument('nms_threshold', default_value='0.45'),
+        DeclareLaunchArgument('num_classes', default_value='1'),
         container,
         encoder_launch,
     ])

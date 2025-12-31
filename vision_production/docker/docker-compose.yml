@@ -16,5 +16,6 @@ services:
       NMS_TH: "0.45"
     volumes:
       - /dev/bus/usb:/dev/bus/usb
+      - ../src:/opt/vision/src
     devices:
       - /dev/bus/usb

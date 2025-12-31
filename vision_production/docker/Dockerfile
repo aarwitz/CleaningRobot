@@ -15,6 +15,7 @@ RUN ls /usr/local/lib/librealsense* >/dev/null
 
 COPY launch/vision_bringup.launch.py /opt/vision/vision_bringup.launch.py
 COPY scripts /opt/vision/scripts
+COPY src /opt/vision/src
 COPY models /models
 COPY checksums.txt /opt/vision/checksums.txt
 
