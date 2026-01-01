@@ -76,3 +76,29 @@ Designed for production restart-on-failure patterns.
 ## Quick Start
 
 ### Build
+
+
+
+TODO slam + path planning + navigation pipeline:
+URDF + robot_state_publisher
+    publishes: base_link -> camera_link
+
+realsense2_camera
+    publishes: image, depth, imu
+    publishes: camera_link -> camera_*_optical_frame
+
+isaac_ros_visual_slam
+    consumes: image, depth, imu, TF
+    publishes: map -> odom (always)
+    optionally publishes: odom -> base_link
+
+isaac_ros_nvblox
+    consumes: depth + TF (map → camera)
+
+Nav2
+    consumes: odom + costmap + TF
+    publishes: cmd_vel
+
+Your driver
+    consumes: cmd_vel
+    talks to motors over I²C
