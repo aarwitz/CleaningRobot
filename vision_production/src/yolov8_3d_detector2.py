@@ -99,13 +99,14 @@ class SimpleYoloV83D(Node):
 
         # Topics - change if your launch uses different names
         self.detections_topic = '/detections_output'
+        self.segmentation_topic = '/segmentation_mask'
         self.depth_topic = '/camera/aligned_depth_to_color/image_raw'
         self.color_topic = '/camera/color/image_raw'
         self.depth_info_topic = '/camera/aligned_depth_to_color/camera_info'
         self.yolo_info_topic = '/dnn_image_encoder/resize/camera_info'
 
         # Publishers
-        self.debug_img_pub = self.create_publisher(Image, '/yolov8_debug', 5) # buffer size of 5 messages so subscribers running late are less likely to miss any published messages
+        self.debug_img_pub = self.create_publisher(Image, '/yolov8_debug', 5)
         self.obj_pc_pub = self.create_publisher(PointCloud2, '/detected_objects_pointcloud', 5)
         self.center_pub = self.create_publisher(PointStamped, '/detected_objects_3d', 5)
 
@@ -115,6 +116,7 @@ class SimpleYoloV83D(Node):
 
         # Subscribers with approximate sync
         self.detection_sub = message_filters.Subscriber(self, Detection2DArray, self.detections_topic)
+        self.segmentation_sub = message_filters.Subscriber(self, Image, self.segmentation_topic)
         self.depth_sub = message_filters.Subscriber(self, Image, self.depth_topic)
         self.color_sub = message_filters.Subscriber(self, Image, self.color_topic)
         self.depth_info_sub = message_filters.Subscriber(self, CameraInfo, self.depth_info_topic)
@@ -124,9 +126,9 @@ class SimpleYoloV83D(Node):
         # it is a synchronizer/filter that buffers messages from the message_filters.Subscriber objects you pass it
         # and looks for sets whose header.stamp values are within the configured slop.
         self.sync = ApproximateTimeSynchronizer(
-            [self.detection_sub, self.depth_sub, self.color_sub, self.depth_info_sub, self.yolo_info_sub],
-            queue_size=30, # increased from 10 - TODO why does increasing queue size and slop help "smooth" detection?
-            slop=0.2       # increased from 0.08 (200 ms tolerance for matching timestamps)
+            [self.detection_sub, self.segmentation_sub, self.depth_sub, self.color_sub, self.depth_info_sub, self.yolo_info_sub],
+            queue_size=30,
+            slop=0.2
         )
         self.sync.registerCallback(self.callback_sync)
         # registerCallback(your_fn) simply tells that synchronizer which function to call when it finds a matched set.
@@ -146,13 +148,12 @@ class SimpleYoloV83D(Node):
         self.frame_count = 0
         self.get_logger().info("Simple YOLOv8 3D detector started")
 
-    def callback_sync(self, detections_msg, depth_msg, color_msg, depth_info_msg, yolo_info_msg):
-        """Enqueue synced frame immediately (non-blocking). 
-            TODO: how does this help move heavy work off the executor thread
-        """
+    def callback_sync(self, detections_msg, segmentation_msg, depth_msg, color_msg, depth_info_msg, yolo_info_msg):
+        """Enqueue synced frame immediately (non-blocking)."""
         with self.queue_lock:
             self.frame_queue.append({
                 'detections': detections_msg,
+                'segmentation': segmentation_msg,
                 'depth': depth_msg,
                 'color': color_msg,
                 'depth_info': depth_info_msg,
@@ -170,6 +171,7 @@ class SimpleYoloV83D(Node):
         verbose = (self.frame_count % 30 == 0)  # Log every second
         
         detections_msg = frame['detections']
+        segmentation_msg = frame['segmentation']
         depth_msg = frame['depth']
         color_msg = frame['color']
         depth_info_msg = frame['depth_info']
@@ -178,8 +180,9 @@ class SimpleYoloV83D(Node):
         if verbose:
             self.get_logger().info(f"Frame {self.frame_count}: {len(detections_msg.detections)} detections")
         try:
-            color = self.br.imgmsg_to_cv2(color_msg, desired_encoding='bgr8') # convert to bgr for opencv
+            color = self.br.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
             depth = self.br.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
+            segmentation = self.br.imgmsg_to_cv2(segmentation_msg, desired_encoding='mono8')
         except Exception as e:
             self.get_logger().error(f"Image conversion failed: {e}")
             return
@@ -245,25 +248,25 @@ class SimpleYoloV83D(Node):
             y1 = max(0, min(color_h-1, y1))
             y2 = max(0, min(color_h-1, y2))
 
-            # draw bbox & label
-            cv2.rectangle(overlay, (x1,y1), (x2,y2), (0,255,0), 2)
-            cv2.putText(overlay, f"{label} {score:.2f}", (x1, max(12,y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2)
+            # Extract segmentation mask for this detection (mask is per-detection ID)
+            # MobileSAM outputs mask with detection index as pixel value
+            detection_mask = (segmentation == (i + 1)).astype(np.uint8)
             
-            # draw center crosshair
+            # Overlay mask on debug image (green tint)
+            mask_overlay = cv2.merge([detection_mask * 50, detection_mask * 200, detection_mask * 50])
+            overlay = cv2.addWeighted(overlay, 1.0, mask_overlay, 0.4, 0)
+            
+            # Draw bbox & label
+            cv2.rectangle(overlay, (x1,y1), (x2,y2), (0,255,0), 2)
+            cv2.putText(overlay, f"{label} {score:.2f}", (x1, max(12,y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
+            
+            # Draw center crosshair
             cx_draw = int(round((bbox_cx - pad_x) / scale))
             cy_draw = int(round((bbox_cy - pad_y) / scale))
             cv2.drawMarker(overlay, (cx_draw, cy_draw), (0,0,255), markerType=cv2.MARKER_TILTED_CROSS, markerSize=12, thickness=2)
 
-            # DEBUG: Check depth at bbox location
-            if verbose:
-                bbox_depth_crop = depth[y1:y2, x1:x2]
-                depth_nz = bbox_depth_crop[bbox_depth_crop > 0]
-                self.get_logger().info(f"  Bbox coords: x=[{x1},{x2}], y=[{y1},{y2}], "
-                                      f"bbox_depth nonzero={depth_nz.size}, "
-                                      f"range={np.min(depth_nz) if depth_nz.size > 0 else 0} to {np.max(depth_nz) if depth_nz.size > 0 else 0}")
-
-            # create object point cloud from bbox
-            points, colors = self.create_object_pointcloud(depth, color, x1, y1, x2, y2, fx, fy, cx, cy)
+            # Create object point cloud using segmentation mask (pixel-perfect!)
+            points, colors = self.create_segmented_pointcloud(depth, color, detection_mask, fx, fy, cx, cy)
             
             # Skip this detection if no valid pointcloud
             if points is None or len(points) == 0:
@@ -271,7 +274,7 @@ class SimpleYoloV83D(Node):
                     self.get_logger().warn(f"  No valid pointcloud for detection {i}")
                 continue
                 
-            # publish object point cloud message
+            # Publish object point cloud message
             pc2 = pointcloud2_from_numpy_fast(points, colors, detections_msg.header)
             if pc2 is not None:
                 self.obj_pc_pub.publish(pc2)
@@ -301,6 +304,66 @@ class SimpleYoloV83D(Node):
             self.debug_img_pub.publish(img_msg)
         except Exception as e:
             self.get_logger().warn(f"Failed to publish overlay image: {e}")
+
+    def create_segmented_pointcloud(self, depth_img, color_img, mask, fx, fy, cx, cy):
+        """Create point cloud using pixel-perfect segmentation mask.
+        
+        Args:
+            depth_img: (H, W) depth image in mm or meters
+            color_img: (H, W, 3) BGR color image
+            mask: (H, W) binary mask (0 or 1) indicating segmented pixels
+            fx, fy, cx, cy: camera intrinsics
+            
+        Returns:
+            points: (N, 3) XYZ coordinates in meters
+            colors: (N, 3) RGB colors (uint8)
+        """
+        h, w = depth_img.shape
+        
+        # Handle depth dtype (uint16 in mm OR float32 in meters)
+        is_uint16 = np.issubdtype(depth_img.dtype, np.integer)
+        if is_uint16:
+            depth_mm = depth_img.astype(np.float32)
+        else:
+            depth_mm = (depth_img.astype(np.float32) * 1000.0)
+        
+        # Combine segmentation mask with valid depth range
+        valid_depth = (depth_mm > self.min_depth_mm) & (depth_mm < self.max_depth_mm)
+        combined_mask = (mask > 0) & valid_depth
+        
+        if not np.any(combined_mask):
+            return None, None
+        
+        # Compute median depth for outlier filtering
+        masked_depth = depth_mm[combined_mask]
+        z_med_mm = float(np.median(masked_depth))
+        
+        # Keep points within +/- 50mm of median
+        band_mm = 50.0
+        inlier_mask = combined_mask & (np.abs(depth_mm - z_med_mm) <= band_mm)
+        
+        if not np.any(inlier_mask):
+            inlier_mask = combined_mask  # Fallback if too restrictive
+        
+        # Extract valid pixel coordinates
+        v_idx, u_idx = np.nonzero(inlier_mask)
+        if v_idx.size == 0:
+            return None, None
+        
+        depth_vals_m = depth_mm[v_idx, u_idx] / 1000.0  # Convert to meters
+        
+        # Project to 3D using pinhole camera model
+        X = (u_idx - cx) * depth_vals_m / fx
+        Y = (v_idx - cy) * depth_vals_m / fy
+        Z = depth_vals_m
+        
+        points = np.stack([X, Y, Z], axis=1)
+        
+        # Extract colors (BGR -> RGB)
+        bgr = color_img[v_idx, u_idx]
+        colors = np.stack([bgr[:,2], bgr[:,1], bgr[:,0]], axis=1).astype(np.uint8)
+        
+        return points, colors
 
     def create_object_pointcloud(self, depth_img, color_img, x1, y1, x2, y2, fx, fy, cx, cy):
         """Crop bbox, filter depth, return Nx3 points (meters) and Nx3 uint8 RGB colors."""

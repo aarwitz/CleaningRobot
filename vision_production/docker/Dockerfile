@@ -6,10 +6,15 @@ RUN apt-get update && apt-get install -y \
     ros-humble-isaac-ros-dnn-image-encoder=3.2.10-0jammy \
     ros-humble-isaac-ros-tensor-rt=3.2.10-0jammy \
     ros-humble-isaac-ros-yolov8=3.2.5-0jammy \
+    ros-humble-isaac-ros-segment-anything=3.2.10-0jammy \
+    ros-humble-isaac-ros-triton=3.2.10-0jammy \
     usbutils \
  && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir websockets==12.0
+RUN pip3 install --no-cache-dir \
+    websockets==12.0 \
+    timm \
+    git+https://github.com/ChaoningZhang/MobileSAM.git
 
 RUN ls /usr/local/lib/librealsense* >/dev/null
 

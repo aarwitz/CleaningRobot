@@ -22,6 +22,7 @@ def generate_launch_description():
     confidence_threshold = LaunchConfiguration('confidence_threshold')
     nms_threshold = LaunchConfiguration('nms_threshold')
     num_classes = LaunchConfiguration('num_classes')
+    sam_model_repository = LaunchConfiguration('sam_model_repository')
 
     container = ComposableNodeContainer(
         name='vision_container',
@@ -69,6 +70,24 @@ def generate_launch_description():
                     'num_classes': num_classes,
                 }],
             ),
+            
+            # ------------------------------------------------------------
+            # Segment Anything (MobileSAM) - Takes YOLOv8 detections as prompts
+            # ------------------------------------------------------------
+            ComposableNode(
+                package='isaac_ros_segment_anything',
+                plugin='nvidia::isaac_ros::segment_anything::SegmentAnythingNode',
+                name='segment_anything',
+                parameters=[{
+                    'model_repository_paths': [sam_model_repository],
+                    'max_batch_size': 1,
+                }],
+                remappings=[
+                    ('image', '/camera/color/image_raw'),
+                    ('detections', '/detections_output'),
+                    ('segmentation', '/segmentation_mask'),
+                ],
+            ),
         ],
     )
 
@@ -109,6 +128,7 @@ def generate_launch_description():
         DeclareLaunchArgument('confidence_threshold', default_value='0.25'),
         DeclareLaunchArgument('nms_threshold', default_value='0.45'),
         DeclareLaunchArgument('num_classes', default_value='1'),
+        DeclareLaunchArgument('sam_model_repository', default_value='/models'),
         container,
         encoder_launch,
     ])
