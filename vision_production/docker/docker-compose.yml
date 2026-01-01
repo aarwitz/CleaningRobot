@@ -10,8 +10,8 @@ services:
       CAM_H: "720"
       NET_W: "640"
       NET_H: "640"
-      MODEL_FILE_PATH: "/models/yolov8s.onnx"
-      ENGINE_FILE_PATH: "/models/yolov8s.plan"
+      MODEL_FILE_PATH: "/models/socks2.onnx"
+      ENGINE_FILE_PATH: "/models/socks2.plan"
       CONF_TH: "0.25"
       NMS_TH: "0.45"
     volumes:

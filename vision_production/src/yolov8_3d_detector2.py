@@ -224,12 +224,20 @@ class SimpleYoloV83D(Node):
             bbox_w = det.bbox.size_x
             bbox_h = det.bbox.size_y
 
-            # Yolo doesn't change aspect ratio, so we can just use 640-480=160 pixel shift
-            shift_y_letterbox = det_h - color_h     # 640 - 480 = 160
-            x1 = int(round(bbox_cx - bbox_w / 2))
-            y1 = int(round(bbox_cy - bbox_h / 2 - shift_y_letterbox/2))
-            x2 = int(round(bbox_cx + bbox_w / 2))
-            y2 = int(round(bbox_cy + bbox_h / 2 - shift_y_letterbox/2))
+            # Letterbox transformation: camera 1280x720 -> YOLO 640x640
+            # Scale factor: min(640/1280, 640/720) = 0.5
+            # Scaled dims: 640x360, letterbox padding: (640-360)/2 = 140px top/bottom
+            scale = min(det_w / color_w, det_h / color_h)
+            scaled_w = color_w * scale
+            scaled_h = color_h * scale
+            pad_x = (det_w - scaled_w) / 2
+            pad_y = (det_h - scaled_h) / 2
+            
+            # Convert YOLO coords (640x640) to camera coords (1280x720)
+            x1 = int(round((bbox_cx - bbox_w / 2 - pad_x) / scale))
+            y1 = int(round((bbox_cy - bbox_h / 2 - pad_y) / scale))
+            x2 = int(round((bbox_cx + bbox_w / 2 - pad_x) / scale))
+            y2 = int(round((bbox_cy + bbox_h / 2 - pad_y) / scale))
 
             # clamp to image size
             x1 = max(0, min(color_w-1, x1))
@@ -241,9 +249,9 @@ class SimpleYoloV83D(Node):
             cv2.rectangle(overlay, (x1,y1), (x2,y2), (0,255,0), 2)
             cv2.putText(overlay, f"{label} {score:.2f}", (x1, max(12,y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2)
             
-            # draw center crosshair (ensure integer pixel coords for OpenCV)
-            cx_draw = int(round(bbox_cx))
-            cy_draw = int(round(bbox_cy - shift_y_letterbox / 2.0))
+            # draw center crosshair
+            cx_draw = int(round((bbox_cx - pad_x) / scale))
+            cy_draw = int(round((bbox_cy - pad_y) / scale))
             cv2.drawMarker(overlay, (cx_draw, cy_draw), (0,0,255), markerType=cv2.MARKER_TILTED_CROSS, markerSize=12, thickness=2)
 
             # DEBUG: Check depth at bbox location
