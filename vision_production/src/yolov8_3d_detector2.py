@@ -133,8 +133,8 @@ class SimpleYoloV83D(Node):
         # The message_filters.Subscribers receive messages from the ROS middleware, forward them into the synchronizer’s buffers,
         # and the synchronizer invokes your registered callback with the matched messages.
 
-        #1: Timer for processing (30 Hz) TODO: is this even used?
-        self.process_timer = self.create_timer(1.0 / 30.0, self.process_frame)
+        #1: Timer for processing (15 Hz) - Lower rate to reduce GPU contention with SLAM
+        self.process_timer = self.create_timer(1.0 / 15.0, self.process_frame)
 
         # Simple class list for label drawing (adjust to your model)
         self.class_names = ['sock']

@@ -14,8 +14,13 @@ services:
       ENGINE_FILE_PATH: "/models/socks2.plan"
       CONF_TH: "0.25"
       NMS_TH: "0.45"
+      ENABLE_SLAM: "true"
     volumes:
       - /dev/bus/usb:/dev/bus/usb
       - ../src:/opt/vision/src
+      - slam_data:/tmp/cuvslam
     devices:
       - /dev/bus/usb
+
+volumes:
+  slam_data:

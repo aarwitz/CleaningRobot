@@ -1,0 +1,1332 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>YOLOv8 3D Viewer</title>
+  <style>
+    body { 
+      font-family: system-ui, -apple-system, sans-serif; 
+      margin: 0; padding: 16px; 
+      background: #111; color: #eee; 
+    }
+    
+    .tabs {
+      display: flex;
+      margin-bottom: 16px;
+      border-bottom: 1px solid #333;
+    }
+    
+    .tab {
+      padding: 12px 24px;
+      background: #222;
+      color: #ccc;
+      cursor: pointer;
+      border: none;
+      border-bottom: 3px solid transparent;
+      margin-right: 4px;
+    }
+    
+    .tab.active {
+      background: #333;
+      color: #fff;
+      border-bottom-color: #0af;
+    }
+    
+    .tab-content {
+      display: none;
+      min-height: 600px;
+    }
+    
+    .tab-content.active {
+      display: block;
+    }
+    
+    #view2d {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    
+    #canvasWrap {
+      width: 90vw;
+      max-width: 1280px;
+      border: 1px solid #333;
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    
+    #frame {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+    
+    #view3d {
+      width: 100%;
+      height: 600px;
+      border: 1px solid #333;
+      background: #000;
+      position: relative;
+    }
+    
+    #threejs-container {
+      width: 100%;
+      height: 100%;
+    }
+    
+    .info-panel {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.8);
+      padding: 12px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+      max-width: 300px;
+      z-index: 100;
+    }
+    
+    .controls {
+      margin-top: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    
+    .controls input, .controls button {
+      padding: 8px 12px;
+      background: #333;
+      border: 1px solid #555;
+      color: #fff;
+      border-radius: 4px;
+    }
+    
+    .controls button:hover {
+      background: #444;
+    }
+    
+    .controls button:disabled {
+      background: #222;
+      color: #666;
+    }
+    
+    .status {
+      margin-top: 8px;
+      font-size: 14px;
+      color: #ccc;
+    }
+
+    .debug-info {
+      margin-top: 16px;
+      padding: 12px;
+      background: #222;
+      border: 1px solid #333;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 11px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+  <h2>Enhanced YOLOv8 3D Object Detection Viewer - with Center Point</h2>
+  
+  <div class="tabs">
+    <button class="tab active" data-tab="2d">2D Detection</button>
+    <button class="tab" data-tab="3d">3D Point Cloud</button>
+    <button class="tab" data-tab="slam">SLAM Map</button>
+  </div>
+  
+  <!-- 2D View Tab -->
+  <div id="view2d" class="tab-content active">
+    <div id="canvasWrap">
+      <img id="frame" alt="Waiting for frames..." />
+    </div>
+    
+    <div class="controls">
+      <label>WebSocket URL:</label>
+      <input id="host2d" type="text" value="ws://100.110.118.74:8765/2d" style="width:300px" />
+      <button id="connect2d">Connect 2D</button>
+      <button id="disconnect2d" disabled>Disconnect</button>
+      <span>FPS: <span id="fps2d">0</span></span>
+    </div>
+    
+    <div class="status" id="status2d">Ready to connect...</div>
+  </div>
+  
+  <!-- 3D View Tab -->
+  <div id="view3d" class="tab-content">
+    <div id="threejs-container"></div>
+    <div class="info-panel" id="info-panel">
+      <div><strong>3D Point Cloud Viewer</strong></div>
+      <div id="point-count">Points: 0</div>
+
+      <div id="connection-status">🔴 Disconnected</div>
+      <div id="rgb-debug">RGB: Not available</div>
+      <div style="margin-top: 8px; font-size: 10px; color: #888;">
+        Mouse: Rotate | Wheel: Zoom | Right-click: Pan
+      </div>
+    </div>
+    
+    <div class="controls">
+      <label>3D URL:</label>
+      <input id="host3d" type="text" value="ws://100.110.118.74:8765/3d" style="width:250px" />
+      <button id="connect3d">Connect 3D</button>
+      <button id="disconnect3d" disabled>Disconnect</button>
+      <br>
+      <label>Center Point URL:</label>
+      <input id="hostCenter" type="text" value="ws://100.110.118.74:8765/center" style="width:250px" />
+      <button id="toggleCenter">Show Center Point</button>
+      
+      <br>
+      <label>Full Scene URL:</label>
+      <input id="hostFullScene" type="text" value="ws://100.110.118.74:8765/full_scene" style="width:250px" />
+      <button id="toggleFullScene">Show Whole Scene</button>
+
+      <br>
+      <button id="reset-view">Reset View</button>
+
+      <label><input type="checkbox" id="show-axes" checked> Show Axes</label>
+      <label><input type="checkbox" id="show-center" checked> Show Center Marker</label>
+
+      <label>Point Size: <input type="range" id="point-size" min="0.1" max="15" step="0.1" value="0.5" style="width: 150px;"></label>
+      <span>Updates: <span id="update-count">0</span></span>
+    </div>
+    
+    <div class="status" id="status3d">Ready to connect...</div>
+    
+    <div class="debug-info" id="debug-info">
+      <div><strong>Debug Log:</strong></div>
+      <div id="debug-log"></div>
+    </div>
+  </div>
+
+  <!-- SLAM Map Tab -->
+  <div id="viewslam" class="tab-content">
+    <div id="slam-container" style="width: 100%; height: 600px; border: 1px solid #333; background: #000; position: relative;">
+      <div id="slam-threejs"></div>
+      <div class="info-panel" style="top: 10px; left: 10px; z-index: 100;">
+        <div><strong>SLAM Map Viewer</strong></div>
+        <div id="slam-status">🔴 Disconnected</div>
+        <div id="slam-trajectory-points">Trajectory: 0 points</div>
+        <div id="slam-landmarks-count">Landmarks: 0 points</div>
+        <div style="margin-top: 8px; font-size: 10px; color: #888;">
+          Green line: Robot path<br>
+          Blue arrow: Current pose<br>
+          White points: Map landmarks
+        </div>
+      </div>
+    </div>
+    
+    <div class="controls">
+      <label>Trajectory URL:</label>
+      <input id="hostSlamTrajectory" type="text" value="ws://100.110.118.74:8765/slam_trajectory" style="width:250px" />
+      <button id="connectSlamTrajectory">Connect Trajectory</button>
+      <button id="disconnectSlamTrajectory" disabled>Disconnect</button>
+      <br>
+      <label>Pose URL:</label>
+      <input id="hostSlamPose" type="text" value="ws://100.110.118.74:8765/slam_pose" style="width:250px" />
+      <button id="connectSlamPose">Connect Pose</button>
+      <button id="disconnectSlamPose" disabled>Disconnect</button>
+      <br>
+      <label>Landmarks URL:</label>
+      <input id="hostSlamLandmarks" type="text" value="ws://100.110.118.74:8765/slam_landmarks" style="width:250px" />
+      <button id="connectSlamLandmarks">Connect Landmarks</button>
+      <button id="disconnectSlamLandmarks" disabled>Disconnect</button>
+      <br>
+      <button id="reset-slam-view">Reset View</button>
+      <button id="clear-trajectory">Clear Trajectory</button>
+      <label><input type="checkbox" id="show-slam-axes" checked> Show Axes</label>
+      <label><input type="checkbox" id="show-trajectory" checked> Show Trajectory</label>
+      <label><input type="checkbox" id="show-pose" checked> Show Pose</label>
+      <label><input type="checkbox" id="show-landmarks" checked> Show Landmarks</label>
+    </div>
+    
+    <div class="status" id="status-slam">Ready to connect...</div>
+  </div>
+
+  <script>
+    // Debug logging
+    function debugLog(message) {
+      const log = document.getElementById('debug-log');
+      const timestamp = new Date().toLocaleTimeString();
+      log.innerHTML = `[${timestamp}] ${message}<br>` + log.innerHTML;
+      
+      // Keep only last 20 entries
+      const lines = log.innerHTML.split('<br>');
+      if (lines.length > 20) {
+        log.innerHTML = lines.slice(0, 20).join('<br>');
+      }
+    }
+
+    // Tab switching
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const targetTab = tab.dataset.tab;
+        
+        // Update tab buttons
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        
+        // Update tab content
+        document.querySelectorAll('.tab-content').forEach(content => {
+          content.classList.remove('active');
+        });
+        document.getElementById(`view${targetTab}`).classList.add('active');
+        
+        // Initialize 3D scene if switching to 3D tab
+        if (targetTab === '3d' && !window.scene) {
+          init3DScene();
+        }
+        
+        // Initialize SLAM scene if switching to SLAM tab
+        if (targetTab === 'slam' && !slamScene) {
+          setTimeout(() => initSlamScene(), 100);
+        }
+      });
+    });
+
+    // 2D Streaming (existing code)
+    const img = document.getElementById('frame');
+    const status2d = document.getElementById('status2d');
+    const fps2dEl = document.getElementById('fps2d');
+    const host2dInput = document.getElementById('host2d');
+    const connect2dBtn = document.getElementById('connect2d');
+    const disconnect2dBtn = document.getElementById('disconnect2d');
+
+    let ws2d = null;
+    let frameCount2d = 0;
+    let lastFpsUpdate2d = performance.now();
+
+    function updateFPS2D() {
+      const now = performance.now();
+      frameCount2d++;
+      if (now - lastFpsUpdate2d >= 500) {
+        const fps = Math.round((frameCount2d * 1000) / (now - lastFpsUpdate2d));
+        fps2dEl.textContent = fps;
+        frameCount2d = 0;
+        lastFpsUpdate2d = now;
+      }
+    }
+
+    function connect2D(url) {
+      if (ws2d) ws2d.close();
+      status2d.textContent = `Connecting to ${url}...`;
+      debugLog(`Connecting to 2D stream: ${url}`);
+      ws2d = new WebSocket(url);
+      ws2d.binaryType = 'arraybuffer';
+
+      ws2d.onopen = () => {
+        status2d.textContent = 'Connected to 2D stream';
+        connect2dBtn.disabled = true;
+        disconnect2dBtn.disabled = false;
+        debugLog('2D WebSocket connected');
+      };
+
+      ws2d.onmessage = (evt) => {
+        try {
+          if (evt.data.byteLength > 0) {
+            const blob = new Blob([evt.data], { type: 'image/jpeg' });
+            const url = URL.createObjectURL(blob);
+            const oldUrl = img.src;
+            img.onload = () => {
+              updateFPS2D();
+              if (oldUrl && oldUrl.startsWith('blob:')) {
+                URL.revokeObjectURL(oldUrl);
+              }
+              img.onload = null;
+            };
+            img.src = url;
+          }
+        } catch (e) {
+          debugLog(`2D frame error: ${e.message}`);
+        }
+      };
+
+      ws2d.onclose = (e) => {
+        status2d.textContent = `Disconnected (${e.code})`;
+        connect2dBtn.disabled = false;
+        disconnect2dBtn.disabled = true;
+        debugLog(`2D WebSocket closed: ${e.code}`);
+      };
+
+      ws2d.onerror = (err) => {
+        debugLog(`2D WebSocket error: ${err}`);
+        status2d.textContent = 'WebSocket error';
+      };
+    }
+
+    // 3D Scene Setup
+    let scene, camera, renderer, controls, pointCloud;
+    let axesHelper, centerMarker;
+    let currentPointSize = 2;
+
+    function init3DScene() {
+      const container = document.getElementById('threejs-container');
+      
+      // Scene
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x111111);
+
+      // Camera
+      camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.01, 100);
+      camera.position.set(0.5, 0.5, 1);
+
+      // Renderer
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      renderer.outputEncoding = THREE.sRGBEncoding;
+      container.appendChild(renderer.domElement);
+
+      // Controls
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+      controls.target.set(0, 0, 0.3);
+
+      // Axes helper
+      axesHelper = new THREE.AxesHelper(0.2);
+      scene.add(axesHelper);
+
+      // Grid
+      const gridHelper = new THREE.GridHelper(1, 20, 0x444444, 0x222222);
+      gridHelper.rotateX(Math.PI / 2);
+      gridHelper.position.z = 0;
+      scene.add(gridHelper);
+
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+      scene.add(ambientLight);
+      
+      const pointLight = new THREE.PointLight(0xffffff, 0.5);
+      pointLight.position.set(1, 1, 1);
+      scene.add(pointLight);
+
+      // Handle resize
+      window.addEventListener('resize', () => {
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+      });
+
+      // Start render loop
+      animate();
+      
+      window.scene = scene; // Mark as initialized
+      debugLog('3D scene initialized');
+    }
+
+    function createCenterMarker(x, y, z) {
+      // Remove existing marker
+      if (centerMarker) {
+        scene.remove(centerMarker);
+        // Dispose of all child geometries and materials
+        centerMarker.traverse((child) => {
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) child.material.dispose();
+        });
+      }
+
+      // Create a group to hold both the solid sphere and wireframe
+      centerMarker = new THREE.Group();
+      centerMarker.position.set(x, y, z);
+
+      // Create a bright solid sphere to mark the center point
+      const solidGeometry = new THREE.SphereGeometry(0.02, 16, 12); // 2cm radius sphere
+      const solidMaterial = new THREE.MeshBasicMaterial({ 
+        color: 0xff0000, // Bright red
+        transparent: true,
+        opacity: 0.7
+      });
+      
+      const solidSphere = new THREE.Mesh(solidGeometry, solidMaterial);
+      centerMarker.add(solidSphere);
+
+      // Add a slightly larger wireframe outline for better visibility
+      const wireGeometry = new THREE.SphereGeometry(0.022, 8, 6); // Slightly larger, fewer segments
+      const wireMaterial = new THREE.MeshBasicMaterial({ 
+        color: 0xffffff,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.5
+      });
+      
+      const wireframeSphere = new THREE.Mesh(wireGeometry, wireMaterial);
+      centerMarker.add(wireframeSphere);
+      
+      // Check visibility setting
+      const showCenterCheckbox = document.getElementById('show-center');
+      centerMarker.visible = showCenterCheckbox ? showCenterCheckbox.checked : true;
+      
+      scene.add(centerMarker);
+
+      debugLog(`Center marker created at (${x.toFixed(3)}, ${y.toFixed(3)}, ${z.toFixed(3)})`);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      if (controls) controls.update();
+      if (renderer && scene && camera) {
+        renderer.render(scene, camera);
+      }
+    }
+
+    let updateCounter = 0;
+    
+    function updatePointCloudBinary(buffer) {
+      try {
+        // If we're showing full scene, don't update with object-only point cloud
+        if (showingFullScene) {
+          debugLog('Skipping object point cloud update while showing full scene');
+          return;
+        }
+        
+        // Binary format: uint32 num_points, float32[num_points*3], uint8[num_points*3]
+        const dv = new DataView(buffer);
+        const num = dv.getUint32(0, true); // little-endian
+        
+        if (num === 0) {
+          debugLog('Received empty point cloud');
+          document.getElementById('point-count').textContent = 'Points: 0';
+          return;
+        }
+        
+        debugLog(`Binary point cloud: ${num} points, ${buffer.byteLength} bytes`);
+        
+        const pointsOffset = 4;
+        const pointsCount = num * 3;
+        const positions = new Float32Array(buffer, pointsOffset, pointsCount);
+        const pointsByteLen = num * 3 * 4; // 4 bytes per float32
+        const colorsOffset = pointsOffset + pointsByteLen;
+        const colorsRaw = new Uint8Array(buffer, colorsOffset, num * 3);
+        
+        // Remove existing point cloud
+        if (pointCloud) {
+          scene.remove(pointCloud);
+          pointCloud.geometry.dispose();
+          pointCloud.material.dispose();
+        }
+        
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        
+        // Normalize uint8 colors to 0-1 range for Three.js
+        geometry.setAttribute('color', new THREE.BufferAttribute(colorsRaw, 3, true)); // normalized=true
+        
+        const material = new THREE.PointsMaterial({
+          size: currentPointSize,
+          vertexColors: true,
+          sizeAttenuation: false
+        });
+        
+        pointCloud = new THREE.Points(geometry, material);
+        scene.add(pointCloud);
+        
+        // Update info panel
+        document.getElementById('point-count').textContent = `Object Points: ${num}`;
+        document.getElementById('connection-status').textContent = '🟢 Connected';
+        document.getElementById('rgb-debug').textContent = `RGB: ${num} color points`;
+        
+        updateCounter++;
+        document.getElementById('update-count').textContent = updateCounter;
+        
+        debugLog(`Point cloud updated: ${num} points`);
+      } catch (e) {
+        debugLog(`Binary point cloud error: ${e.message}`);
+        console.error('Failed to update binary point cloud', e);
+      }
+    }
+    
+    function updatePointCloud(pointData) {
+      try {
+        // If we're showing full scene, don't update with object-only point cloud
+        if (showingFullScene) {
+          debugLog('Skipping object point cloud update while showing full scene');
+          return;
+        }
+        
+        debugLog(`Received point cloud data: ${pointData.length} bytes`);
+        
+        const data = JSON.parse(pointData);
+        debugLog(`Parsed ${data.num_points} points, has colors: ${data.colors && data.colors.length > 0}`);
+        
+        // Remove existing point cloud
+        if (pointCloud) {
+          scene.remove(pointCloud);
+          pointCloud.geometry.dispose();
+          pointCloud.material.dispose();
+        }
+
+        if (data.points && data.points.length > 0) {
+          const geometry = new THREE.BufferGeometry();
+          
+          // Set positions
+          const positions = new Float32Array(data.points);
+          geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          
+          let hasValidColors = false;
+          
+          // Set colors if available and valid
+          if (data.colors && data.colors.length === data.points.length) { // both are 3*N
+            // If server sends floats 0..1, convert to 0..255 here:
+            const colSrc = data.colors;
+            const u8 = new Uint8Array(colSrc.length);
+            for (let i = 0; i < colSrc.length; i++) u8[i] = Math.max(0, Math.min(255, Math.round(colSrc[i] * 255)));
+            
+            // Convert from sRGB to linear color space for vertex colors (since renderer uses sRGB encoding)
+            for (let i = 0; i < u8.length; i++) {
+              const srgb = u8[i] / 255;
+              const linear = srgb <= 0.04045 ? srgb / 12.92 : Math.pow((srgb + 0.055)/1.055, 2.4);
+              u8[i] = Math.round(linear * 255);
+            }
+            
+            geometry.setAttribute('color', new THREE.BufferAttribute(u8, 3, true)); // normalized=true
+            hasValidColors = true;
+            document.getElementById('rgb-debug').textContent = `RGB: ${data.colors.length/3} color points`;
+          } else {
+            document.getElementById('rgb-debug').textContent = 'RGB: No color data';
+            debugLog(`Color data issue: colors.length=${data.colors ? data.colors.length : 'none'}, points.length=${data.points.length}`);
+          }
+
+          // Create point cloud material with proper color handling
+          const material = new THREE.PointsMaterial({
+            size: currentPointSize,
+            vertexColors: hasValidColors,
+            sizeAttenuation: false,  // false = screen pixels, true = world space
+            color: hasValidColors ? undefined : 0x00ff00
+          });
+
+          pointCloud = new THREE.Points(geometry, material);
+          scene.add(pointCloud);
+
+          // Update info panel
+          document.getElementById('point-count').textContent = `Object Points: ${data.num_points}`;
+          document.getElementById('connection-status').textContent = '🟢 Connected';
+          
+          updateCounter++;
+          document.getElementById('update-count').textContent = updateCounter;
+          
+          debugLog(`Point cloud updated: ${data.num_points} points, RGB: ${hasValidColors}, size: ${currentPointSize.toFixed(4)}`);
+        } else {
+          document.getElementById('point-count').textContent = 'Points: 0';
+          debugLog('No points in received data');
+        }
+      } catch (e) {
+        debugLog(`Point cloud update error: ${e.message}`);
+        console.error('Failed to update point cloud', e);
+      }
+    }
+
+
+
+    // Center point handling
+    function updateCenterPoint(centerDataString) {
+      try {
+        debugLog(`Received center point data: ${centerDataString.length} bytes`);
+        
+        const data = JSON.parse(centerDataString);
+        debugLog(`Parsed center point: (${data.x.toFixed(3)}, ${data.y.toFixed(3)}, ${data.z.toFixed(3)})`);
+        
+        // Update the 3D marker
+        createCenterMarker(data.x, data.y, data.z);
+        
+      } catch (e) {
+        debugLog(`Center point parse error: ${e.message}`);
+        console.error('Failed to parse center point', e);
+      }
+    }
+
+
+
+    // 3D WebSocket connections
+    let ws3d = null;
+    let wsCenter = null;
+    let wsFullScene = null;
+    let centerConnected = false;
+    let fullSceneConnected = false;
+    let showingFullScene = false;
+
+    const status3d = document.getElementById('status3d');
+    const host3dInput = document.getElementById('host3d');
+    const hostCenterInput = document.getElementById('hostCenter');
+    const hostFullSceneInput = document.getElementById('hostFullScene');
+    const connect3dBtn = document.getElementById('connect3d');
+    const disconnect3dBtn = document.getElementById('disconnect3d');
+    const toggleCenterBtn = document.getElementById('toggleCenter');
+    const toggleFullSceneBtn = document.getElementById('toggleFullScene');
+    const resetViewBtn = document.getElementById('reset-view');
+    const showAxesCheckbox = document.getElementById('show-axes');
+    const showCenterCheckbox = document.getElementById('show-center');
+
+    const pointSizeSlider = document.getElementById('point-size');
+
+    function connect3D(url) {
+      if (ws3d) ws3d.close();
+      status3d.textContent = `Connecting to 3D: ${url}...`;
+      debugLog(`Connecting to 3D stream: ${url}`);
+      ws3d = new WebSocket(url);
+      ws3d.binaryType = 'arraybuffer';
+
+      ws3d.onopen = () => {
+        status3d.textContent = 'Connected to 3D stream';
+        connect3dBtn.disabled = true;
+        disconnect3dBtn.disabled = false;
+        debugLog('3D WebSocket connected');
+      };
+
+      ws3d.onmessage = (evt) => {
+        try {
+          if (evt.data && evt.data.byteLength > 0) {
+            // Binary format: uint32 num_points, float32[num_points*3], uint8[num_points*3]
+            updatePointCloudBinary(evt.data);
+          }
+        } catch (e) {
+          debugLog(`3D data error: ${e.message}`);
+        }
+      };
+
+      ws3d.onclose = (e) => {
+        status3d.textContent = `3D Disconnected (${e.code})`;
+        connect3dBtn.disabled = false;
+        disconnect3dBtn.disabled = true;
+        document.getElementById('connection-status').textContent = '🔴 Disconnected';
+        debugLog(`3D WebSocket closed: ${e.code}`);
+      };
+
+      ws3d.onerror = (err) => {
+        debugLog(`3D WebSocket error: ${err}`);
+      };
+    }
+
+
+
+    function connectCenter(url) {
+      if (wsCenter) wsCenter.close();
+      debugLog(`Connecting to center point stream: ${url}`);
+      wsCenter = new WebSocket(url);
+      wsCenter.binaryType = 'arraybuffer';
+
+      wsCenter.onopen = () => {
+        centerConnected = true;
+        toggleCenterBtn.textContent = 'Hide Center Points';
+        toggleCenterBtn.style.background = '#0a5a0a';
+        debugLog('Center point WebSocket connected');
+      };
+
+      wsCenter.onmessage = (evt) => {
+        try {
+          if (evt.data.byteLength > 0) {
+            const centerString = new TextDecoder().decode(evt.data);
+            updateCenterPoint(centerString);
+          }
+        } catch (e) {
+          debugLog(`Center point error: ${e.message}`);
+        }
+      };
+
+      wsCenter.onclose = (e) => {
+        centerConnected = false;
+        toggleCenterBtn.textContent = 'Show Center Points';
+        toggleCenterBtn.style.background = '#333';
+        debugLog(`Center point WebSocket closed: ${e.code}`);
+      };
+
+      wsCenter.onerror = (err) => {
+        debugLog(`Center point WebSocket error: ${err}`);
+      };
+    }
+
+    function disconnectCenter() {
+      if (wsCenter) {
+        wsCenter.close();
+        wsCenter = null;
+      }
+      // Hide the existing center marker
+      if (centerMarker) {
+        scene.remove(centerMarker);
+        // Dispose of geometries and materials
+        centerMarker.traverse((child) => {
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) child.material.dispose();
+        });
+        centerMarker = null;
+      }
+      // Manually update the state since onclose might not fire immediately
+      centerConnected = false;
+      toggleCenterBtn.textContent = 'Show Center Points';
+      toggleCenterBtn.style.background = '#333';
+      debugLog('Center point manually disconnected and marker hidden');
+    }
+
+    function connectFullScene(url) {
+      if (wsFullScene) wsFullScene.close();
+      debugLog(`Connecting to full scene stream: ${url}`);
+      wsFullScene = new WebSocket(url);
+      wsFullScene.binaryType = 'arraybuffer';
+
+      wsFullScene.onopen = () => {
+        fullSceneConnected = true;
+        showingFullScene = true;
+        toggleFullSceneBtn.textContent = 'Hide Whole Scene';
+        toggleFullSceneBtn.style.background = '#0a5a0a';
+        debugLog('Full scene WebSocket connected');
+      };
+
+      wsFullScene.onmessage = (evt) => {
+        try {
+          if (evt.data && evt.data.byteLength > 0) {
+            // Binary format: uint32 num_points, float32[num_points*3], uint8[num_points*3]
+            updateFullScenePointCloudBinary(evt.data);
+          }
+        } catch (e) {
+          debugLog(`Full scene error: ${e.message}`);
+        }
+      };
+
+      wsFullScene.onclose = (e) => {
+        fullSceneConnected = false;
+        showingFullScene = false;
+        toggleFullSceneBtn.textContent = 'Show Whole Scene';
+        toggleFullSceneBtn.style.background = '#333';
+        debugLog(`Full scene WebSocket closed: ${e.code}`);
+        // Switch back to object-only point cloud
+        if (ws3d && ws3d.readyState === WebSocket.OPEN) {
+          debugLog('Switching back to object-only point cloud');
+        }
+      };
+
+      wsFullScene.onerror = (err) => {
+        debugLog(`Full scene WebSocket error: ${err}`);
+      };
+    }
+
+    function disconnectFullScene() {
+      if (wsFullScene) {
+        wsFullScene.close();
+        wsFullScene = null;
+      }
+      // Manually update the state since onclose might not fire immediately
+      fullSceneConnected = false;
+      showingFullScene = false;
+      toggleFullSceneBtn.textContent = 'Show Whole Scene';
+      toggleFullSceneBtn.style.background = '#333';
+      debugLog('Full scene manually disconnected, switching back to object-only view');
+    }
+
+    function updateFullScenePointCloudBinary(buffer) {
+      try {
+        // Binary format: uint32 num_points, float32[num_points*3], uint8[num_points*3]
+        const dv = new DataView(buffer);
+        const num = dv.getUint32(0, true); // little-endian
+        
+        if (num === 0) {
+          debugLog('Received empty full scene');
+          return;
+        }
+        
+        debugLog(`Binary full scene: ${num} points, ${buffer.byteLength} bytes`);
+        
+        const pointsOffset = 4;
+        const pointsCount = num * 3;
+        const positions = new Float32Array(buffer, pointsOffset, pointsCount);
+        const pointsByteLen = num * 3 * 4; // 4 bytes per float32
+        const colorsOffset = pointsOffset + pointsByteLen;
+        const colorsRaw = new Uint8Array(buffer, colorsOffset, num * 3);
+        
+        // Debug: Check bounds
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        for (let i = 0; i < positions.length; i += 3) {
+          const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+          if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+            minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+            minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+            minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+          }
+        }
+        debugLog(`Full scene bounds: X[${minX.toFixed(2)}, ${maxX.toFixed(2)}] Y[${minY.toFixed(2)}, ${maxY.toFixed(2)}] Z[${minZ.toFixed(2)}, ${maxZ.toFixed(2)}]`);
+        
+        // Remove existing point cloud
+        if (pointCloud) {
+          scene.remove(pointCloud);
+          pointCloud.geometry.dispose();
+          pointCloud.material.dispose();
+        }
+        
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colorsRaw, 3, true)); // normalized=true
+        
+        const material = new THREE.PointsMaterial({
+          size: parseFloat(pointSizeSlider.value),
+          vertexColors: true,
+          sizeAttenuation: false
+        });
+        
+        pointCloud = new THREE.Points(geometry, material);
+        scene.add(pointCloud);
+        
+        // Update info
+        document.getElementById('point-count').textContent = `Full Scene Points: ${num}`;
+        document.getElementById('rgb-debug').textContent = `RGB: ${num} color points`;
+        
+        debugLog(`Full scene updated: ${num} points`);
+      } catch (e) {
+        debugLog(`Binary full scene error: ${e.message}`);
+        console.error('Failed to update binary full scene', e);
+      }
+    }
+
+    function updateFullScenePointCloud(dataString) {
+      try {
+        const data = JSON.parse(dataString);
+        
+        if (data && data.points && data.colors) {
+          debugLog(`Full scene: ${data.points.length / 3} points received`);
+          
+          // Debug: Check point cloud bounds
+          const positions = new Float32Array(data.points);
+          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+          for (let i = 0; i < positions.length; i += 3) {
+            const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+            if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+              minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+              minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+              minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+            }
+          }
+          debugLog(`Full scene bounds: X[${minX.toFixed(2)}, ${maxX.toFixed(2)}] Y[${minY.toFixed(2)}, ${maxY.toFixed(2)}] Z[${minZ.toFixed(2)}, ${maxZ.toFixed(2)}]`);
+          
+          // Use the same point cloud updating logic but for full scene
+          if (pointCloud) {
+            scene.remove(pointCloud);
+            pointCloud.geometry.dispose();
+            pointCloud.material.dispose();
+          }
+
+          const geometry = new THREE.BufferGeometry();
+          const colors = new Float32Array(data.colors);
+          
+          // Debug: Check color values
+          let minR = 1, maxR = 0, minG = 1, maxG = 0, minB = 1, maxB = 0;
+          let blackPixels = 0, greenPixels = 0;
+          for (let i = 0; i < colors.length; i += 3) {
+            const r = colors[i], g = colors[i + 1], b = colors[i + 2];
+            minR = Math.min(minR, r); maxR = Math.max(maxR, r);
+            minG = Math.min(minG, g); maxG = Math.max(maxG, g);
+            minB = Math.min(minB, b); maxB = Math.max(maxB, b);
+            
+            if (r === 0 && g === 0 && b === 0) blackPixels++;
+            if (g > 0.5 && r < 0.3 && b < 0.3) greenPixels++;
+          }
+          debugLog(`Full scene colors: R[${minR.toFixed(2)}-${maxR.toFixed(2)}] G[${minG.toFixed(2)}-${maxG.toFixed(2)}] B[${minB.toFixed(2)}-${maxB.toFixed(2)}], Black: ${blackPixels}, Green-ish: ${greenPixels}`);
+          
+          geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+          
+          // Use same material settings as object point cloud for consistency
+          const material = new THREE.PointsMaterial({
+            size: parseFloat(pointSizeSlider.value),
+            vertexColors: true,
+            sizeAttenuation: false  // Changed to match object point cloud behavior
+          });
+          
+          pointCloud = new THREE.Points(geometry, material);
+          scene.add(pointCloud);
+          
+          // Update info
+          const pointCount = positions.length / 3;
+          document.getElementById('point-count').textContent = `Full Scene Points: ${pointCount}`;
+          
+          // Update RGB debug info if available
+          if (data.rgb_debug) {
+            document.getElementById('rgb-debug').textContent = `RGB: ${data.rgb_debug}`;
+          }
+          
+          debugLog(`Full scene point cloud updated: ${pointCount} points`);
+        }
+      } catch (e) {
+        debugLog(`Full scene parse error: ${e.message}`);
+        console.error('Failed to parse full scene point cloud', e);
+      }
+    }
+
+    // Event listeners
+    connect2dBtn.onclick = () => connect2D(host2dInput.value);
+    disconnect2dBtn.onclick = () => {
+      if (ws2d) {
+        ws2d.close();
+        ws2d = null;
+      }
+    };
+
+    connect3dBtn.onclick = () => connect3D(host3dInput.value);
+    disconnect3dBtn.onclick = () => {
+      if (ws3d) {
+        ws3d.close();
+        ws3d = null;
+      }
+    };
+
+
+
+    toggleCenterBtn.onclick = () => {
+      if (!centerConnected) {
+        connectCenter(hostCenterInput.value);
+      } else {
+        disconnectCenter();
+      }
+    };
+
+    toggleFullSceneBtn.onclick = () => {
+      if (!fullSceneConnected) {
+        connectFullScene(hostFullSceneInput.value);
+      } else {
+        disconnectFullScene();
+      }
+    };
+
+
+
+    resetViewBtn.onclick = () => {
+      if (camera && controls) {
+        camera.position.set(0.5, 0.5, 1);
+        controls.target.set(0, 0, 0.3);
+        controls.update();
+        debugLog('Camera view reset');
+      }
+    };
+
+
+
+    showAxesCheckbox.onchange = () => {
+      if (axesHelper) {
+        axesHelper.visible = showAxesCheckbox.checked;
+        debugLog(`Axes ${showAxesCheckbox.checked ? 'shown' : 'hidden'}`);
+      }
+    };
+
+    showCenterCheckbox.onchange = () => {
+      if (centerMarker) {
+        centerMarker.visible = showCenterCheckbox.checked;
+        debugLog(`Center marker ${showCenterCheckbox.checked ? 'shown' : 'hidden'}`);
+      }
+    };
+
+
+
+    pointSizeSlider.oninput = () => {
+      currentPointSize = parseFloat(pointSizeSlider.value);
+      if (pointCloud && pointCloud.material) {
+        pointCloud.material.size = currentPointSize;
+        pointCloud.material.needsUpdate = true;
+        debugLog(`Point size updated to ${currentPointSize.toFixed(4)}`);
+      }
+    };
+
+    // ===== SLAM VISUALIZATION =====
+    let slamScene, slamCamera, slamRenderer, slamControls;
+    let slamTrajectoryLine, slamPoseMarker, slamLandmarks, slamAxes;
+    let wsSlamTrajectory = null, wsSlamPose = null, wsSlamLandmarks = null;
+    let trajectoryPoints = [];
+
+    function initSlamScene() {
+      const container = document.getElementById('slam-threejs');
+      
+      // Scene
+      slamScene = new THREE.Scene();
+      slamScene.background = new THREE.Color(0x111111);
+
+      // Camera
+      slamCamera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.01, 1000);
+      slamCamera.position.set(0, -3, 2);  // Top-down-ish view
+
+      // Renderer
+      slamRenderer = new THREE.WebGLRenderer({ antialias: true });
+      slamRenderer.setSize(container.clientWidth, container.clientHeight);
+      container.appendChild(slamRenderer.domElement);
+
+      // Controls
+      slamControls = new THREE.OrbitControls(slamCamera, slamRenderer.domElement);
+      slamControls.enableDamping = true;
+      slamControls.dampingFactor = 0.05;
+      slamControls.target.set(0, 0, 0);
+
+      // Axes
+      slamAxes = new THREE.AxesHelper(1);
+      slamScene.add(slamAxes);
+
+      // Grid
+      const grid = new THREE.GridHelper(10, 50, 0x444444, 0x222222);
+      grid.rotateX(Math.PI / 2);
+      slamScene.add(grid);
+
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+      slamScene.add(ambientLight);
+
+      // Start animation
+      animateSlam();
+      debugLog('SLAM scene initialized');
+    }
+
+    function animateSlam() {
+      requestAnimationFrame(animateSlam);
+      slamControls.update();
+      slamRenderer.render(slamScene, slamCamera);
+    }
+
+    function updateTrajectory(points) {
+      // Remove old line
+      if (slamTrajectoryLine) {
+        slamScene.remove(slamTrajectoryLine);
+        slamTrajectoryLine.geometry.dispose();
+        slamTrajectoryLine.material.dispose();
+      }
+
+      if (points.length < 2) return;
+
+      const geometry = new THREE.BufferGeometry();
+      const positions = new Float32Array(points.length * 3);
+      
+      for (let i = 0; i < points.length; i++) {
+        positions[i * 3] = points[i].x;
+        positions[i * 3 + 1] = points[i].y;
+        positions[i * 3 + 2] = points[i].z;
+      }
+
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const material = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 });
+      slamTrajectoryLine = new THREE.Line(geometry, material);
+      
+      const showTrajectory = document.getElementById('show-trajectory');
+      slamTrajectoryLine.visible = showTrajectory ? showTrajectory.checked : true;
+      
+      slamScene.add(slamTrajectoryLine);
+      document.getElementById('slam-trajectory-points').textContent = `Trajectory: ${points.length} points`;
+    }
+
+    function updatePose(poseData) {
+      // Remove old marker
+      if (slamPoseMarker) {
+        slamScene.remove(slamPoseMarker);
+      }
+
+      const pos = poseData.position;
+      const quat = poseData.orientation;
+
+      // Create arrow showing robot pose
+      const dir = new THREE.Vector3(1, 0, 0);  // Forward direction
+      const origin = new THREE.Vector3(pos.x, pos.y, pos.z);
+      const length = 0.3;
+      const hex = 0x0088ff;
+      
+      slamPoseMarker = new THREE.ArrowHelper(dir, origin, length, hex, 0.1, 0.05);
+      
+      // Apply quaternion rotation
+      const quaternion = new THREE.Quaternion(quat.x, quat.y, quat.z, quat.w);
+      slamPoseMarker.setRotationFromQuaternion(quaternion);
+      
+      const showPose = document.getElementById('show-pose');
+      slamPoseMarker.visible = showPose ? showPose.checked : true;
+      
+      slamScene.add(slamPoseMarker);
+    }
+
+    function updateLandmarksBinary(buffer) {
+      // Remove old landmarks
+      if (slamLandmarks) {
+        slamScene.remove(slamLandmarks);
+        slamLandmarks.geometry.dispose();
+        slamLandmarks.material.dispose();
+      }
+
+      const dv = new DataView(buffer);
+      const numPoints = dv.getUint32(0, true);
+      
+      if (numPoints === 0) return;
+
+      const xyzOffset = 4;
+      const rgbOffset = xyzOffset + numPoints * 12;
+      
+      const positions = new Float32Array(numPoints * 3);
+      const colors = new Float32Array(numPoints * 3);
+      
+      for (let i = 0; i < numPoints; i++) {
+        positions[i * 3] = dv.getFloat32(xyzOffset + i * 12, true);
+        positions[i * 3 + 1] = dv.getFloat32(xyzOffset + i * 12 + 4, true);
+        positions[i * 3 + 2] = dv.getFloat32(xyzOffset + i * 12 + 8, true);
+        
+        const r = dv.getUint8(rgbOffset + i * 3);
+        const g = dv.getUint8(rgbOffset + i * 3 + 1);
+        const b = dv.getUint8(rgbOffset + i * 3 + 2);
+        colors[i * 3] = r / 255;
+        colors[i * 3 + 1] = g / 255;
+        colors[i * 3 + 2] = b / 255;
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      
+      const material = new THREE.PointsMaterial({ size: 0.02, vertexColors: true });
+      slamLandmarks = new THREE.Points(geometry, material);
+      
+      const showLandmarks = document.getElementById('show-landmarks');
+      slamLandmarks.visible = showLandmarks ? showLandmarks.checked : true;
+      
+      slamScene.add(slamLandmarks);
+      document.getElementById('slam-landmarks-count').textContent = `Landmarks: ${numPoints} points`;
+    }
+
+    // SLAM WebSocket connections
+    function connectSlamTrajectory(url) {
+      if (wsSlamTrajectory) wsSlamTrajectory.close();
+      
+      wsSlamTrajectory = new WebSocket(url);
+      wsSlamTrajectory.binaryType = 'arraybuffer';
+      
+      wsSlamTrajectory.onopen = () => {
+        document.getElementById('slam-status').innerHTML = '🟢 Trajectory Connected';
+        document.getElementById('connectSlamTrajectory').disabled = true;
+        document.getElementById('disconnectSlamTrajectory').disabled = false;
+        debugLog('SLAM trajectory connected');
+      };
+      
+      wsSlamTrajectory.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(evt.data);
+          trajectoryPoints = data;
+          updateTrajectory(trajectoryPoints);
+        } catch (e) {
+          debugLog(`SLAM trajectory parse error: ${e}`);
+        }
+      };
+      
+      wsSlamTrajectory.onclose = () => {
+        document.getElementById('slam-status').innerHTML = '🔴 Trajectory Disconnected';
+        document.getElementById('connectSlamTrajectory').disabled = false;
+        document.getElementById('disconnectSlamTrajectory').disabled = true;
+      };
+    }
+
+    function connectSlamPose(url) {
+      if (wsSlamPose) wsSlamPose.close();
+      
+      wsSlamPose = new WebSocket(url);
+      
+      wsSlamPose.onopen = () => {
+        debugLog('SLAM pose connected');
+      };
+      
+      wsSlamPose.onmessage = (evt) => {
+        try {
+          const poseData = JSON.parse(evt.data);
+          updatePose(poseData);
+        } catch (e) {
+          debugLog(`SLAM pose parse error: ${e}`);
+        }
+      };
+    }
+
+    function connectSlamLandmarks(url) {
+      if (wsSlamLandmarks) wsSlamLandmarks.close();
+      
+      wsSlamLandmarks = new WebSocket(url);
+      wsSlamLandmarks.binaryType = 'arraybuffer';
+      
+      wsSlamLandmarks.onopen = () => {
+        debugLog('SLAM landmarks connected');
+      };
+      
+      wsSlamLandmarks.onmessage = (evt) => {
+        if (evt.data instanceof ArrayBuffer) {
+          updateLandmarksBinary(evt.data);
+        }
+      };
+    }
+
+    // SLAM event listeners
+    document.getElementById('connectSlamTrajectory').onclick = () => {
+      if (!slamScene) initSlamScene();
+      connectSlamTrajectory(document.getElementById('hostSlamTrajectory').value);
+    };
+
+    document.getElementById('disconnectSlamTrajectory').onclick = () => {
+      if (wsSlamTrajectory) wsSlamTrajectory.close();
+    };
+
+    document.getElementById('connectSlamPose').onclick = () => {
+      if (!slamScene) initSlamScene();
+      connectSlamPose(document.getElementById('hostSlamPose').value);
+    };
+
+    document.getElementById('disconnectSlamPose').onclick = () => {
+      if (wsSlamPose) wsSlamPose.close();
+    };
+
+    document.getElementById('connectSlamLandmarks').onclick = () => {
+      if (!slamScene) initSlamScene();
+      connectSlamLandmarks(document.getElementById('hostSlamLandmarks').value);
+    };
+
+    document.getElementById('disconnectSlamLandmarks').onclick = () => {
+      if (wsSlamLandmarks) wsSlamLandmarks.close();
+    };
+
+    document.getElementById('reset-slam-view').onclick = () => {
+      if (slamCamera && slamControls) {
+        slamCamera.position.set(0, -3, 2);
+        slamControls.target.set(0, 0, 0);
+        slamControls.update();
+      }
+    };
+
+    document.getElementById('clear-trajectory').onclick = () => {
+      trajectoryPoints = [];
+      if (slamTrajectoryLine) {
+        slamScene.remove(slamTrajectoryLine);
+      }
+      document.getElementById('slam-trajectory-points').textContent = 'Trajectory: 0 points';
+    };
+
+    document.getElementById('show-slam-axes').onchange = (e) => {
+      if (slamAxes) slamAxes.visible = e.target.checked;
+    };
+
+    document.getElementById('show-trajectory').onchange = (e) => {
+      if (slamTrajectoryLine) slamTrajectoryLine.visible = e.target.checked;
+    };
+
+    document.getElementById('show-pose').onchange = (e) => {
+      if (slamPoseMarker) slamPoseMarker.visible = e.target.checked;
+    };
+
+    document.getElementById('show-landmarks').onchange = (e) => {
+      if (slamLandmarks) slamLandmarks.visible = e.target.checked;
+    };
+
+    // Tab switching - initialize SLAM scene when tab is activated
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        if (tab.dataset.tab === 'slam' && !slamScene) {
+          setTimeout(() => initSlamScene(), 100);  // Small delay to ensure container is visible
+        }
+      });
+    });
+
+    // Auto-connect on load
+    window.addEventListener('load', () => {
+      connect2D(host2dInput.value);
+      debugLog('Page loaded, auto-connecting 2D');
+
+    });
+  </script>
+</body>
+</html>

@@ -27,15 +27,27 @@ echo "[entrypoint] Launching RealSense..."
 # ------------------------------
 # 1. Start RealSense driver
 # ------------------------------
+# SLAM requires infrared - use lower resolution for GPU optimization
 ros2 launch realsense2_camera rs_launch.py \
   enable_color:=true \
   enable_depth:=true \
-  align_depth.enable:=true \
-  enable_sync:=true \
-  color_width:="${CAM_W:-640}" \
-  color_height:="${CAM_H:-480}" \
+  enable_infra1:=true \
+  enable_infra2:=true \
+  enable_gyro:=true \
+  enable_accel:=true \
+  align_depth.enable:=false \
+  enable_sync:=false \
+  color_width:=640 \
+  color_height:=480 \
   color_fps:=30 \
-  depth_module.profile:="${CAM_W:-640}x${CAM_H:-480}x30" &
+  infra_width:=640 \
+  infra_height:=360 \
+  infra_fps:=30 \
+  depth_module.profile:=640x480x15 \
+  depth_module.depth_fps:=15 \
+  gyro_fps:=200 \
+  accel_fps:=100 \
+  unite_imu_method:=1 &
 REALSENSE_PID=$!
 
 # Wait for RealSense to publish topics
@@ -65,32 +77,39 @@ if [ "$CAMERA_READY" = false ]; then
   exit 21
 fi
 
-echo "[entrypoint] Launching vision graph..."
+echo "[entrypoint] SLAM-only mode - YOLOv8 disabled for optimal navigation performance"
 
 # ------------------------------
-# 2. Start vision graph
+# 2. Vision graph disabled (prioritize SLAM for navigation)
 # ------------------------------
-ros2 launch /opt/vision/vision_bringup.launch.py \
-  cam_w:="${CAM_W:-640}" cam_h:="${CAM_H:-480}" \
-  net_w:="${NET_W:-640}" net_h:="${NET_H:-640}" \
-  model_file_path:="${MODEL_FILE_PATH:-/models/yolov8s.onnx}" \
-  engine_file_path:="${ENGINE_FILE_PATH:-/models/yolov8s.plan}" \
-  confidence_threshold:="${CONF_TH:-0.25}" \
-  nms_threshold:="${NMS_TH:-0.45}" &
-VISION_PID=$!
+# Uncomment to enable YOLOv8 detection:
+# ros2 launch /opt/vision/vision_bringup.launch.py \
+#   cam_w:="${CAM_W:-640}" cam_h:="${CAM_H:-480}" \
+#   net_w:="${NET_W:-640}" net_h:="${NET_H:-640}" \
+#   model_file_path:="${MODEL_FILE_PATH:-/models/yolov8s.onnx}" \
+#   engine_file_path:="${ENGINE_FILE_PATH:-/models/yolov8s.plan}" \
+#   confidence_threshold:="${CONF_TH:-0.7}" \
+#   nms_threshold:="${NMS_TH:-0.45}" &
+# VISION_PID=$!
 
-# Give NITROS nodes time to complete negotiation
-echo "[entrypoint] Waiting for NITROS negotiation to complete..."
+# Give time for topics to stabilize
+echo "[entrypoint] Waiting for topics to stabilize..."
 sleep 5
 
 # ------------------------------
-# 3. Clean shutdown
+# 3. Python scripts disabled (3D detection not needed for SLAM/Nav2)
 # ------------------------------
-trap "kill ${VISION_PID} ${REALSENSE_PID} 2>/dev/null || true" EXIT
+echo "[entrypoint] 3D detection scripts disabled - running SLAM + 2D YOLOv8 only"
 
 # ------------------------------
-# 4. Validation
+# 4. Clean shutdown
+# ------------------------------
+trap "kill ${REALSENSE_PID} 2>/dev/null || true" EXIT
+
+# ------------------------------
+# 5. Validation
 # ------------------------------
 /opt/vision/scripts/validate_graph.sh
 
-wait "${VISION_PID}"
+# Keep container alive
+tail -f /dev/null

@@ -6,6 +6,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, PointCloud2
 from std_msgs.msg import String
 from geometry_msgs.msg import PointStamped
+from nav_msgs.msg import Odometry
 from cv_bridge import CvBridge
 
 import cv2
@@ -34,11 +35,17 @@ class Enhanced3DViewer(Node):
         self._latest_full_scene = None
         self._latest_metadata = None
         self._latest_center_point = None
+        self._latest_slam_trajectory = []
+        self._latest_slam_pose = None
+        self._latest_slam_landmarks = None
         self._last_2d_time = 0
         self._last_3d_time = 0
         self._last_full_scene_time = 0
         self._last_meta_time = 0
         self._last_center_time = 0
+        self._last_slam_trajectory_time = 0
+        self._last_slam_pose_time = 0
+        self._last_slam_landmarks_time = 0
         self._lock = threading.Lock()
         
         # Cache hashes to detect changes
@@ -52,6 +59,8 @@ class Enhanced3DViewer(Node):
         self._full_scene_count = 0
         self._meta_count = 0
         self._center_count = 0
+        self._slam_odom_count = 0
+        self._slam_landmarks_count = 0
 
         # Subscribers with debugging
         self.create_subscription(Image, '/yolov8_debug', self.image_callback, 10)
@@ -59,6 +68,10 @@ class Enhanced3DViewer(Node):
         self.create_subscription(PointCloud2, '/full_scene_pointcloud', self.full_scene_callback, 10)
         self.create_subscription(String, '/detection_metadata', self.metadata_callback, 10)
         self.create_subscription(PointStamped, '/detected_objects_3d', self.center_point_callback, 10)
+        
+        # SLAM subscribers
+        self.create_subscription(Odometry, '/visual_slam/tracking/odometry', self.slam_odom_callback, 10)
+        self.create_subscription(PointCloud2, '/visual_slam/vis/landmarks_cloud', self.slam_landmarks_callback, 10)
 
         # Create a timer to report status
         self.create_timer(5.0, self.report_status)
@@ -79,7 +92,11 @@ class Enhanced3DViewer(Node):
                 f"Meta: {self._meta_count} msgs "
                 f"(last: {now - self._last_meta_time:.1f}s ago), "
                 f"Center: {self._center_count} msgs "
-                f"(last: {now - self._last_center_time:.1f}s ago)"
+                f"(last: {now - self._last_center_time:.1f}s ago), "
+                f"SLAM Odom: {self._slam_odom_count} msgs "
+                f"(last: {now - self._last_slam_trajectory_time:.1f}s ago), "
+                f"SLAM Landmarks: {self._slam_landmarks_count} msgs "
+                f"(last: {now - self._last_slam_landmarks_time:.1f}s ago)"
             )
 
     def image_callback(self, msg):
@@ -169,6 +186,61 @@ class Enhanced3DViewer(Node):
                 self.get_logger().info(f"🎯 Received center point #{self._center_count}: ({center_data['x']:.3f}, {center_data['y']:.3f}, {center_data['z']:.3f})")
         except Exception as e:
             self.get_logger().error(f"Failed to process center point: {e}")
+            traceback.print_exc()
+
+    def slam_odom_callback(self, msg):
+        """Build trajectory from odometry messages"""
+        try:
+            self._slam_odom_count += 1
+            # Extract position and orientation
+            pos = msg.pose.pose.position
+            orient = msg.pose.pose.orientation
+            
+            pose_data = {
+                'position': {
+                    'x': float(pos.x),
+                    'y': float(pos.y),
+                    'z': float(pos.z)
+                },
+                'orientation': {
+                    'x': float(orient.x),
+                    'y': float(orient.y),
+                    'z': float(orient.z),
+                    'w': float(orient.w)
+                },
+                'timestamp': time.time()
+            }
+            
+            with self._lock:
+                # Add to trajectory (keep last 1000 points)
+                self._latest_slam_trajectory.append(pose_data['position'])
+                if len(self._latest_slam_trajectory) > 1000:
+                    self._latest_slam_trajectory.pop(0)
+                
+                # Update current pose
+                self._latest_slam_pose = json.dumps(pose_data).encode('utf-8')
+                self._last_slam_trajectory_time = time.time()
+                self._last_slam_pose_time = time.time()
+                
+            if self._slam_odom_count % 30 == 0:  # Log every 30th message
+                self.get_logger().info(f"🗺️  SLAM odometry #{self._slam_odom_count}, trajectory points: {len(self._latest_slam_trajectory)}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to process SLAM odometry: {e}")
+            traceback.print_exc()
+
+    def slam_landmarks_callback(self, msg):
+        """Process SLAM landmark point cloud"""
+        try:
+            self._slam_landmarks_count += 1
+            # Convert to binary (limit points for performance)
+            landmarks_bytes = self.pointcloud2_to_binary(msg, max_points=10000)
+            with self._lock:
+                self._latest_slam_landmarks = landmarks_bytes
+                self._last_slam_landmarks_time = time.time()
+            if self._slam_landmarks_count % 10 == 0:
+                self.get_logger().info(f"🏔️  SLAM landmarks #{self._slam_landmarks_count}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to process SLAM landmarks: {e}")
             traceback.print_exc()
 
 
@@ -349,6 +421,13 @@ class Enhanced3DViewer(Node):
                 return self._latest_metadata
             elif data_type == 'center':
                 return self._latest_center_point
+            elif data_type == 'slam_trajectory':
+                # Return trajectory as JSON
+                return json.dumps(self._latest_slam_trajectory).encode('utf-8')
+            elif data_type == 'slam_pose':
+                return self._latest_slam_pose
+            elif data_type == 'slam_landmarks':
+                return self._latest_slam_landmarks
         return None
     
     def get_latest_hash(self, data_type):
@@ -376,6 +455,12 @@ class Enhanced3DViewer(Node):
                 return self._latest_metadata is not None and (now - self._last_meta_time) < 10
             elif data_type == 'center':
                 return self._latest_center_point is not None and (now - self._last_center_time) < 10
+            elif data_type == 'slam_trajectory':
+                return len(self._latest_slam_trajectory) > 0 and (now - self._last_slam_trajectory_time) < 10
+            elif data_type == 'slam_pose':
+                return self._latest_slam_pose is not None and (now - self._last_slam_pose_time) < 10
+            elif data_type == 'slam_landmarks':
+                return self._latest_slam_landmarks is not None and (now - self._last_slam_landmarks_time) < 10
         return False
 
 node_ref = None
@@ -405,8 +490,14 @@ async def stream_handler(websocket, path=None):
             data_type = 'metadata'
         elif path == '/center':
             data_type = 'center'
+        elif path == '/slam_trajectory':
+            data_type = 'slam_trajectory'
+        elif path == '/slam_pose':
+            data_type = 'slam_pose'
+        elif path == '/slam_landmarks':
+            data_type = 'slam_landmarks'
         else:
-            await websocket.send("Invalid path. Use /2d, /3d, /full_scene, /metadata, or /center")
+            await websocket.send("Invalid path. Use /2d, /3d, /full_scene, /metadata, /center, /slam_trajectory, /slam_pose, or /slam_landmarks")
             return
 
         # Send initial status
@@ -438,8 +529,10 @@ async def stream_handler(websocket, path=None):
                 # Adjust sleep based on data type (2D faster, 3D slower)
                 if data_type == '2d':
                     await asyncio.sleep(0.05)  # 20 FPS for 2D (faster)
-                elif data_type in ['metadata', 'center']:
-                    await asyncio.sleep(0.05)  # 20 FPS for metadata
+                elif data_type in ['metadata', 'center', 'slam_pose']:
+                    await asyncio.sleep(0.05)  # 20 FPS for metadata/pose
+                elif data_type in ['slam_trajectory', 'slam_landmarks']:
+                    await asyncio.sleep(0.2)  # 5 FPS for trajectory/landmarks (less frequent updates)
                 else:
                     await asyncio.sleep(0.1)  # 10 FPS for 3D (slower to reduce load)
                 
@@ -465,6 +558,9 @@ async def main_ws_server():
     print("  ws://localhost:8765/full_scene - Full scene point cloud data")
     print("  ws://localhost:8765/metadata - Detection metadata")
     print("  ws://localhost:8765/center - 3D center point data")
+    print("  ws://localhost:8765/slam_trajectory - SLAM robot trajectory")
+    print("  ws://localhost:8765/slam_pose - SLAM current pose")
+    print("  ws://localhost:8765/slam_landmarks - SLAM map landmarks")
     
     try:
         server = await websockets.serve(stream_handler, "0.0.0.0", 8765)

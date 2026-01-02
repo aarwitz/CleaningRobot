@@ -6,6 +6,9 @@ RUN apt-get update && apt-get install -y \
     ros-humble-isaac-ros-dnn-image-encoder=3.2.10-0jammy \
     ros-humble-isaac-ros-tensor-rt=3.2.10-0jammy \
     ros-humble-isaac-ros-yolov8=3.2.5-0jammy \
+    ros-humble-isaac-ros-visual-slam \
+    ros-humble-robot-state-publisher \
+    ros-humble-xacro \
     usbutils \
  && rm -rf /var/lib/apt/lists/*
 
@@ -17,6 +20,7 @@ COPY launch/vision_bringup.launch.py /opt/vision/vision_bringup.launch.py
 COPY scripts /opt/vision/scripts
 COPY src /opt/vision/src
 COPY models /models
+COPY urdf /opt/vision/urdf
 COPY checksums.txt /opt/vision/checksums.txt
 
 RUN chmod +x /opt/vision/scripts/*.sh
