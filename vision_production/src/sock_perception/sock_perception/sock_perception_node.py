@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sock Perception Node - 3D target extraction from YOLO detections + depth
+Sock Perception Node - Efficient 2D detection relay + on-demand 3D lookup
 
 Subscribes to:
   - /yolo/detections (vision_msgs/Detection2DArray)
@@ -8,43 +8,38 @@ Subscribes to:
   - /camera/color/camera_info (sensor_msgs/CameraInfo)
 
 Publishes:
-  - /sock/target_point_map (geometry_msgs/PoseStamped) - filtered 3D point in map frame
-  - /sock/target_point_camera (geometry_msgs/PointStamped) - debug, camera frame
-  - /sock/target_depth_m (std_msgs/Float32) - debug, depth value
+  - /sock/detected (vision_msgs/Detection2D) - best sock detection (2D only)
 
 Services:
   - /sock_perception/enable (std_srvs/SetBool)
   - /sock_perception/reset_target (std_srvs/Trigger)
+  - /sock_perception/get_sock_3d (behavior_manager/GetSock3D) - compute 3D on-demand
 
 Algorithm:
-1. Receive YOLO detection bbox
-2. Compute bbox center pixel (u, v)
-3. Extract 7x7 window from aligned depth, compute median (ignoring 0/NaN)
-4. Back-project to camera coordinates using pinhole model:
-   X = (u - cx) * Z / fx
-   Y = (v - cy) * Z / fy
-   Z = depth_m
-5. Transform to map frame via TF2
-6. Apply temporal filter (median of last K points)
-7. Publish as PoseStamped
+  Lightweight mode (continuous):
+    1. Receive YOLO detections
+    2. Publish best detection (2D only) for behavior manager
+    3. No depth sampling, no 3D math, no TF lookups
+  
+  On-demand mode (service call):
+    1. Receive detection via service
+    2. Extract 7x7 depth window, compute median
+    3. Back-project to 3D using pinhole model
+    4. Return PointStamped in camera frame
 """
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 import numpy as np
-from collections import deque
 import cv2
 from cv_bridge import CvBridge
 
-from vision_msgs.msg import Detection2DArray
+from vision_msgs.msg import Detection2DArray, Detection2D
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import PoseStamped, PointStamped, TransformStamped
-from std_msgs.msg import Float32
+from geometry_msgs.msg import PointStamped
 from std_srvs.srv import SetBool, Trigger
-import tf2_ros
-from tf2_ros import TransformException
-import tf2_geometry_msgs
+from behavior_manager_interfaces.srv import GetSock3D
 
 
 class SockPerceptionNode(Node):
@@ -53,12 +48,10 @@ class SockPerceptionNode(Node):
         
         # Parameters
         self.declare_parameter('confidence_threshold', 0.7)
-        self.declare_parameter('temporal_filter_size', 5)
         self.declare_parameter('depth_window_size', 7)
         self.declare_parameter('max_depth_m', 5.0)
         self.declare_parameter('min_depth_m', 0.2)
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
-        self.declare_parameter('map_frame', 'map')
         self.declare_parameter('rate_hz', 5.0)
         self.declare_parameter('net_w', 640)  # YOLO network input width
         self.declare_parameter('net_h', 640)  # YOLO network input height
@@ -68,14 +61,7 @@ class SockPerceptionNode(Node):
         self.camera_info: CameraInfo = None
         self.latest_depth_image: np.ndarray = None
         self.bridge = CvBridge()
-        
-        # Temporal filter
-        filter_size = self.get_parameter('temporal_filter_size').value
-        self.point_history = deque(maxlen=filter_size)
-        
-        # TF2
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.latest_detection: Detection2D = None
         
         # QoS for camera topics - try RELIABLE first to match RealSense publisher
         qos_profile_reliable = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
@@ -103,26 +89,20 @@ class SockPerceptionNode(Node):
             qos_profile_best_effort  # This one is typically best effort
         )
         
-        # Publishers
-        self.target_map_pub = self.create_publisher(
-            PoseStamped,
-            '/sock/target_point_map',
-            10
-        )
-        
-        self.target_camera_pub = self.create_publisher(
-            PointStamped,
-            '/sock/target_point_camera',
-            10
-        )
-        
-        self.depth_pub = self.create_publisher(
-            Float32,
-            '/sock/target_depth_m',
+        # Publishers - lightweight 2D only
+        self.detection_pub = self.create_publisher(
+            Detection2D,
+            '/sock/detected',
             10
         )
         
         # Services
+        self.get_3d_srv = self.create_service(
+            GetSock3D,
+            '/sock_perception/get_sock_3d',
+            self.get_sock_3d_callback
+        )
+        
         self.enable_srv = self.create_service(
             SetBool,
             '/sock_perception/enable',
@@ -179,6 +159,47 @@ class SockPerceptionNode(Node):
         
         return u_img, v_img
     
+    def get_sock_3d_callback(self, request: GetSock3D.Request, response: GetSock3D.Response):
+        """On-demand 3D lookup - only called when entering PICK state"""
+        if self.camera_info is None:
+            response.success = False
+            response.message = "Camera info not available"
+            return response
+        
+        if self.latest_depth_image is None:
+            response.success = False
+            response.message = "Depth image not available"
+            return response
+        
+        try:
+            # Reuse existing extract_3d_point logic
+            point_3d = self.extract_3d_point(request.detection, self.latest_depth_image)
+            
+            if point_3d is None:
+                response.success = False
+                response.message = "No valid depth at detection location"
+                return response
+            
+            # Create PointStamped in camera frame
+            response.point = PointStamped()
+            response.point.header.stamp = self.get_clock().now().to_msg()
+            response.point.header.frame_id = self.get_parameter('camera_frame').value
+            response.point.point.x = float(point_3d[0])
+            response.point.point.y = float(point_3d[1])
+            response.point.point.z = float(point_3d[2])
+            
+            response.success = True
+            response.message = f"3D position computed: ({point_3d[0]:.3f}, {point_3d[1]:.3f}, {point_3d[2]:.3f})"
+            
+            self.get_logger().info(response.message)
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Error computing 3D: {str(e)}"
+            self.get_logger().error(response.message)
+        
+        return response
+    
     def enable_callback(self, request: SetBool.Request, response: SetBool.Response):
         """Enable/disable perception processing"""
         self.enabled = request.data
@@ -188,8 +209,8 @@ class SockPerceptionNode(Node):
         return response
     
     def reset_callback(self, request: Trigger.Request, response: Trigger.Response):
-        """Reset target and temporal filter"""
-        self.point_history.clear()
+        """Reset detection state"""
+        self.latest_detection = None
         self.pending_detection = None
         response.success = True
         response.message = 'Target reset'
@@ -234,16 +255,12 @@ class SockPerceptionNode(Node):
             self.pending_detection = msg
     
     def process_detections(self):
-        """Process detection at controlled rate"""
+        """LIGHTWEIGHT - just find and publish best 2D detection"""
         if not self.enabled or self.pending_detection is None:
             return
         
         if self.camera_info is None:
             self.get_logger().warn('No camera info yet', throttle_duration_sec=5.0)
-            return
-        
-        if self.latest_depth_image is None:
-            self.get_logger().warn('No depth image yet', throttle_duration_sec=5.0)
             return
         
         # Process the queued detection
@@ -258,43 +275,19 @@ class SockPerceptionNode(Node):
             if not detection.results:
                 continue
             
-            # Assuming results[0] is the class hypothesis
             confidence = detection.results[0].hypothesis.score
-            class_id = detection.results[0].hypothesis.class_id
             
-            # Check if this is a sock (you may need to check class_id or label)
-            # For now, take any detection above threshold
             if confidence > best_confidence:
                 best_detection = detection
                 best_confidence = confidence
         
-        if best_detection is None:
-            return
-        
-        # Extract 3D point
-        try:
-            point_camera = self.extract_3d_point(best_detection, self.latest_depth_image)
-            if point_camera is None:
-                return
-            
-            # Add to temporal filter
-            self.point_history.append(point_camera)
-            
-            # Compute filtered point (median of history)
-            filtered_point = self.compute_filtered_point()
-            if filtered_point is None:
-                return
-            
-            # Publish in camera frame (debug)
-            self.publish_camera_point(filtered_point, msg.header.stamp)
-            
-            # Transform to map frame
-            point_map = self.transform_to_map(filtered_point, msg.header.stamp)
-            if point_map is not None:
-                self.publish_map_target(point_map, msg.header.stamp)
-                
-        except Exception as e:
-            self.get_logger().error(f'Processing error: {e}')
+        if best_detection:
+            self.latest_detection = best_detection
+            self.detection_pub.publish(best_detection)  # 2D only - no depth processing!
+            self.get_logger().info(
+                f'Published 2D detection with confidence {best_confidence:.2f}',
+                throttle_duration_sec=2.0
+            )
     
     def extract_3d_point(self, detection, depth_image: np.ndarray) -> np.ndarray:
         """
@@ -384,85 +377,11 @@ class SockPerceptionNode(Node):
         Y = (v_img - cy) * depth_m / fy
         Z = depth_m
         
-        # Publish debug depth
-        depth_msg = Float32()
-        depth_msg.data = depth_m
-        self.depth_pub.publish(depth_msg)
-        
         # Debug: log successful extraction (throttled)
         if (self.get_clock().now() - self.last_debug_time).nanoseconds < 1.5e9:
             self.get_logger().info(f'Depth at img({u_int}, {v_int}): {depth_m:.3f}m')
         
         return np.array([X, Y, Z])
-    
-    def compute_filtered_point(self) -> np.ndarray:
-        """Compute median of point history for stability"""
-        if len(self.point_history) == 0:
-            return None
-        
-        # Stack points and compute median per axis
-        points = np.array(list(self.point_history))
-        filtered = np.median(points, axis=0)
-        
-        return filtered
-    
-    def publish_camera_point(self, point: np.ndarray, stamp):
-        """Publish point in camera frame (debug)"""
-        msg = PointStamped()
-        msg.header.stamp = stamp
-        msg.header.frame_id = self.get_parameter('camera_frame').value
-        msg.point.x = float(point[0])
-        msg.point.y = float(point[1])
-        msg.point.z = float(point[2])
-        
-        self.target_camera_pub.publish(msg)
-    
-    def transform_to_map(self, point: np.ndarray, stamp) -> PoseStamped:
-        """Transform point from camera frame to map frame"""
-        camera_frame = self.get_parameter('camera_frame').value
-        map_frame = self.get_parameter('map_frame').value
-        
-        # Create PointStamped in camera frame
-        point_camera = PointStamped()
-        point_camera.header.stamp = stamp
-        point_camera.header.frame_id = camera_frame
-        point_camera.point.x = float(point[0])
-        point_camera.point.y = float(point[1])
-        point_camera.point.z = float(point[2])
-        
-        try:
-            # Transform to map frame
-            transform = self.tf_buffer.lookup_transform(
-                map_frame,
-                camera_frame,
-                rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=0.1)
-            )
-            
-            point_map = tf2_geometry_msgs.do_transform_point(point_camera, transform)
-            
-            # Convert to PoseStamped
-            pose_map = PoseStamped()
-            pose_map.header = point_map.header
-            pose_map.pose.position = point_map.point
-            pose_map.pose.orientation.w = 1.0  # Identity orientation
-            
-            return pose_map
-            
-        except TransformException as e:
-            self.get_logger().warn(f'TF error: {e}', throttle_duration_sec=5.0)
-            return None
-    
-    def publish_map_target(self, pose: PoseStamped, stamp):
-        """Publish final filtered target in map frame"""
-        pose.header.stamp = stamp
-        self.target_map_pub.publish(pose)
-        
-        self.get_logger().info(
-            f'Published sock target: ({pose.pose.position.x:.2f}, '
-            f'{pose.pose.position.y:.2f}, {pose.pose.position.z:.2f})',
-            throttle_duration_sec=2.0
-        )
 
 
 def main(args=None):

@@ -22,6 +22,8 @@ from std_srvs.srv import SetBool, Trigger
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
+from vision_msgs.msg import Detection2D
+from behavior_manager_interfaces.srv import GetSock3D
 
 
 class RobotState(Enum):
@@ -71,7 +73,8 @@ class BehaviorManagerNode(Node):
         self.state_enter_time = time.time()
         
         # Sock tracking
-        self.sock_target: PoseStamped = None
+        self.latest_detection: Detection2D = None  # 2D only during WANDER/APPROACH
+        self.sock_target: PoseStamped = None  # 3D position from service call
         self.sock_first_seen_time = None
         self.sock_frame_count = 0
         self.last_sock_update_time = 0.0
@@ -92,6 +95,8 @@ class BehaviorManagerNode(Node):
             SetBool, '/sock_perception/enable')
         self.perception_reset_client = self.create_client(
             Trigger, '/sock_perception/reset_target')
+        self.get_sock_3d_client = self.create_client(
+            GetSock3D, '/sock_perception/get_sock_3d')
         
         # Would be arm service clients (stubs for now)
         # self.arm_pick_client = self.create_client(...)
@@ -102,10 +107,10 @@ class BehaviorManagerNode(Node):
             self, NavigateToPose, 'navigate_to_pose')
         
         # Subscribers
-        self.sock_target_sub = self.create_subscription(
-            PoseStamped,
-            '/sock/target_point_map',
-            self.sock_target_callback,
+        self.sock_detection_sub = self.create_subscription(
+            Detection2D,
+            '/sock/detected',
+            self.sock_detection_callback,
             10
         )
         
@@ -186,6 +191,7 @@ class BehaviorManagerNode(Node):
         
         # Reset sock tracking
         self.call_perception_reset()
+        self.latest_detection = None
         self.sock_target = None
         self.sock_first_seen_time = None
         self.sock_frame_count = 0
@@ -354,7 +360,7 @@ class BehaviorManagerNode(Node):
     # ==================== State: PICK ====================
     
     def enter_pick(self):
-        """Stop base, disable perception, pick sock"""
+        """Stop base, call 3D service, pick sock"""
         self.get_logger().info('Entering PICK')
         
         # Cancel Nav2 goal
@@ -363,12 +369,25 @@ class BehaviorManagerNode(Node):
         # Stop base
         self.stop_base()
         
-        # Disable perception
+        # Disable perception (no need for continuous detection during pick)
         self.set_perception_enabled(False)
+        
+        # Call 3D service for precise position - ONLY NOW do we compute 3D!
+        if self.latest_detection is None:
+            self.get_logger().warn('No detection available for 3D lookup')
+            self.transition_to(RobotState.RECOVER)
+            return
+        
+        self.get_logger().info('Calling GetSock3D service for precise position')
+        request = GetSock3D.Request()
+        request.detection = self.latest_detection
+        
+        # Call service asynchronously
+        future = self.get_sock_3d_client.call_async(request)
+        future.add_done_callback(self.handle_sock_3d_response)
         
         # Call arm pick service (stub)
         self.pick_success = False
-        self.get_logger().info('Calling arm pick service (stub)')
         
         # Simulate pick - in real system, call arm service
         # For now, assume success after delay
@@ -488,7 +507,7 @@ class BehaviorManagerNode(Node):
     
     def is_sock_stable(self) -> bool:
         """Check if sock has been tracked consistently"""
-        if self.sock_target is None:
+        if self.latest_detection is None:
             return False
         
         required_frames = self.get_parameter('sock_stable_frames_required').value
@@ -571,9 +590,9 @@ class BehaviorManagerNode(Node):
     
     # ==================== Callbacks ====================
     
-    def sock_target_callback(self, msg: PoseStamped):
-        """Receive sock target from perception"""
-        self.sock_target = msg
+    def sock_detection_callback(self, msg: Detection2D):
+        """Receive lightweight 2D detection from perception"""
+        self.latest_detection = msg
         self.last_sock_update_time = time.time()
         
         # Track stability
@@ -581,6 +600,30 @@ class BehaviorManagerNode(Node):
             self.sock_first_seen_time = time.time()
         
         self.sock_frame_count += 1
+    
+    def handle_sock_3d_response(self, future):
+        """Handle 3D position service response"""
+        try:
+            response = future.result()
+            if response.success:
+                # Convert PointStamped to PoseStamped for compatibility
+                self.sock_target = PoseStamped()
+                self.sock_target.header = response.point.header
+                self.sock_target.pose.position = response.point.point
+                self.sock_target.pose.orientation.w = 1.0  # Identity orientation
+                
+                self.get_logger().info(
+                    f'Got 3D position: ({response.point.point.x:.3f}, '
+                    f'{response.point.point.y:.3f}, {response.point.point.z:.3f})'
+                )
+                
+                # In real system, would pass sock_target to arm controller here
+            else:
+                self.get_logger().warn(f'3D service failed: {response.message}')
+                self.transition_to(RobotState.RECOVER)
+        except Exception as e:
+            self.get_logger().error(f'3D service error: {e}')
+            self.transition_to(RobotState.RECOVER)
     
     def odom_callback(self, msg: Odometry):
         """Receive odometry from SLAM"""

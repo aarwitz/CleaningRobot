@@ -1,0 +1,9 @@
+# Request: 2D detection to convert to 3D
+vision_msgs/Detection2D detection
+
+---
+
+# Response: 3D position in camera frame
+bool success
+string message
+geometry_msgs/PointStamped point
