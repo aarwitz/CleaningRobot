@@ -1,0 +1,10 @@
+# Service for requesting 3D pose from 2D detection
+# Performs single-frame depth lookup without continuous processing
+
+vision_msgs/BoundingBox2D bbox  # 2D bounding box from detection
+---
+bool success
+geometry_msgs/Point pose_3d  # 3D point in camera/map frame
+string frame_id
+float32 confidence  # Confidence in depth measurement
+string message

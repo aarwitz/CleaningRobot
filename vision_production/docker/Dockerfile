@@ -7,25 +7,34 @@ RUN apt-get update && apt-get install -y \
     ros-humble-isaac-ros-tensor-rt=3.2.10-0jammy \
     ros-humble-isaac-ros-yolov8=3.2.5-0jammy \
     ros-humble-isaac-ros-visual-slam \
+    ros-humble-isaac-ros-nvblox \
+    ros-humble-navigation2 \
+    ros-humble-nav2-bringup \
+    ros-humble-slam-toolbox \
     ros-humble-robot-state-publisher \
     ros-humble-xacro \
     usbutils \
+    i2c-tools \
  && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir websockets==12.0
+RUN pip3 install --no-cache-dir websockets==12.0 smbus-cffi pyserial
 
 RUN ls /usr/local/lib/librealsense* >/dev/null
 
-COPY launch/vision_bringup.launch.py /opt/vision/vision_bringup.launch.py
-COPY scripts /opt/vision/scripts
-COPY src /opt/vision/src
-COPY models /models
-COPY urdf /opt/vision/urdf
-COPY checksums.txt /opt/vision/checksums.txt
+# Create workspace and copy source
+WORKDIR /opt/vision_ws
+COPY src /opt/vision_ws/src
 
-RUN chmod +x /opt/vision/scripts/*.sh
+# Build workspace
+RUN . /opt/ros/humble/setup.sh && \
+    colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# Copy models and entrypoint
+COPY models /models
+COPY scripts/entrypoint.sh /opt/vision_ws/entrypoint.sh
+RUN chmod +x /opt/vision_ws/entrypoint.sh
 
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ENV ROS_DOMAIN_ID=0
 
-ENTRYPOINT ["/opt/vision/scripts/entrypoint.sh"]
+ENTRYPOINT ["/opt/vision_ws/entrypoint.sh"]

@@ -1,95 +1,100 @@
-So far commands:
-script session_log.txt
+# Cleaning Robot - Vision Production
 
-docker build -t vision_production:1.0 -f docker/Dockerfile .
+**Autonomous sock-collecting robot with behavior-driven architecture.**
 
-or full rebuild
+## Quick Start
 
-docker build --no-cache -t vision_production:1.0 -f docker/Dockerfile .
+```bash
+# Build
+docker compose -f docker/docker-compose.yml build
 
-
-sha256sum docker/Dockerfile launch/vision_bringup.launch.py \
-  scripts/*.sh models/* > checksums.txt
-
-
+# Run
 docker compose -f docker/docker-compose.yml up
+```
 
-
-exit
-
-ansi2txt < session_log.txt > cleaned_log.txt
-
-
-# Vision Production (Isaac ROS YOLOv8)
-
-**Production-grade object detection system for RealSense D455 cameras.**
-
-This system provides reliable, deterministic YOLOv8 inference with all dependencies frozen and validated.
+See [QUICKSTART.md](QUICKSTART.md) for details.
 
 ---
 
 ## Architecture
 
-**Optimized Pipeline (Zero-Copy NITROS)**:
 ```
-RealSense D455 (RGB8 1280x720 @ 30Hz)
-  ↓
-DNN Image Encoder (resize + normalize)
-  ↓
-TensorRT (YOLOv8s)
-  ↓
-YOLOv8 Decoder
-  ↓
-/detections_output (vision_msgs/Detection2DArray)
+RealSense D455
+  ├─ RGB → YOLOv8 → Sock Detections
+  ├─ Aligned Depth → 3D Point Extraction
+  ├─ Stereo IR → Visual SLAM → Odometry
+  └─ IMU → SLAM Fusion
+
+Sock Perception → 3D Target (map frame)
+                     ↓
+            Behavior Manager (State Machine)
+                     ↓
+                  Nav2 → /cmd_vel
+                     ↓
+            Motor Controller → I2C Motors
+
+Arm Bridge ← Behavior Manager (pick/place services)
+    ↓
+Waveshare RoArm v2 (serial)
 ```
 
-**Key Design Decisions**:
-- **No Rectify Node**: RealSense D455 outputs pre-rectified images, eliminates format conversion overhead
-- **Direct RGB8 Pipeline**: Avoids BGR8↔RGB8 conversions that cause data flow issues
-- **1280x720 Native Resolution**: Matches RealSense default output, no unnecessary upscaling
-- **NITROS Zero-Copy**: GPU-accelerated data transfer between nodes
+### Components
 
-## Published Outputs
-- `/camera/color/image_raw` - Raw camera feed (1280x720 RGB8)
-- `/camera/color/camera_info` - Camera calibration
-- `/detections_output` - Object detections (vision_msgs/Detection2DArray)
+- **Visual SLAM**: Stereo odometry from infrared cameras + IMU fusion
+- **YOLO Detection**: GPU-accelerated sock detection (Isaac ROS)
+- **Sock Perception**: 3D target extraction with temporal filtering
+- **Behavior Manager**: 6-state orchestration (WANDER→APPROACH→PICK→BASKET→PLACE→RECOVER)
+- **Motor Controller**: Velocity PID control for I2C motor driver (bus 7, addr 0x34)
+- **Arm Bridge**: Serial control of Waveshare RoArm v2 with hand-eye calibration
+- **Nav2**: Navigation stack (optional, disabled by default)
 
-## Production Features
+### Key Design Principles
 
-**Determinism & Reliability**:
-- ✅ Base image pinned: `isaac_ros_dev-aarch64:r36.4.4_ir3.2_frozen`
-- ✅ ROS packages version-locked: `ros-humble-isaac-ros-realsense=3.2.0-1*`
-- ✅ TensorRT engine pre-compiled (no runtime rebuilds)
-- ✅ Explicit tensor naming (no auto-negotiation)
-- ✅ Validated topic wiring with health checks
-- ✅ Optimized pipeline (removed unnecessary nodes)
-
-**Failure Handling**:
-Container exits with specific codes for restart orchestration:
-- **Exit 10**: Required topics not publishing (camera/detections)
-- **Exit 11**: Detection rate too low (< 1 Hz)
-
-Designed for production restart-on-failure patterns.
+1. **One container, one launch** - No backgrounded processes
+2. **Behavior orchestrates navigation** - State machine sends Nav2 goals
+3. **Service-gated perception** - Enable/disable without killing nodes
+4. **Navigation safety-first** - Robot never moves without behavior approval
 
 ---
 
-## Quick Start
+## Project Structure
 
-### Build
+```
+src/
+├── robot_bringup/     # Unified launch, config, URDF
+├── sock_perception/   # YOLO→3D pipeline
+├── behavior_manager/  # State machine
+├── motor_controller/  # Velocity PID for I2C motors
+└── arm_bridge/        # Waveshare RoArm v2 control
+```
 
+All configuration is in ROS2 packages. See [QUICKSTART.md](QUICKSTART.md) for monitoring and troubleshooting.
 
+## Configuration
 
-TODO slam + path planning + navigation pipeline:
-URDF + robot_state_publisher
-    publishes: base_link -> camera_link
+Edit `docker/docker-compose.yml` environment variables:
 
-realsense2_camera
-    publishes: image, depth, imu
-    publishes: camera_link -> camera_*_optical_frame
+```yaml
+ENABLE_SLAM: "true"       # Visual SLAM odometry
+ENABLE_YOLO: "true"       # YOLOv8 sock detection
+ENABLE_BEHAVIOR: "true"   # Behavior state machine
+ENABLE_NAV2: "false"      # Navigation stack
+```
 
-isaac_ros_visual_slam
-    consumes: image, depth, imu, TF
-    publishes: map -> odom (always)
+## Development
+
+The workspace uses `--symlink-install`, so Python node changes don't require rebuild:
+
+```bash
+# Edit node
+vim src/behavior_manager/behavior_manager/behavior_manager_node.py
+
+# Restart container
+docker compose -f docker/docker-compose.yml restart
+```
+
+Changes take effect immediately!
+
     optionally publishes: odom -> base_link
 
 isaac_ros_nvblox

@@ -1,26 +1,35 @@
 services:
   vision:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     image: vision_production:1.0
     network_mode: host
     runtime: nvidia
     privileged: true
     restart: always
     environment:
-      CAM_W: "1280"
-      CAM_H: "720"
+      CAM_W: "640"
+      CAM_H: "480"
       NET_W: "640"
       NET_H: "640"
       MODEL_FILE_PATH: "/models/socks2.onnx"
       ENGINE_FILE_PATH: "/models/socks2.plan"
-      CONF_TH: "0.25"
+      CONF_TH: "0.65"
       NMS_TH: "0.45"
+      NUM_CLASSES: "1"
       ENABLE_SLAM: "true"
+      ENABLE_YOLO: "true"
+      ENABLE_BEHAVIOR: "true"
+      ENABLE_NAV2: "false"
     volumes:
       - /dev/bus/usb:/dev/bus/usb
-      - ../src:/opt/vision/src
+      - /dev/i2c-7:/dev/i2c-7
+      - ../src:/opt/vision_ws/src
       - slam_data:/tmp/cuvslam
     devices:
       - /dev/bus/usb
+      - /dev/i2c-7
 
 volumes:
   slam_data:
