@@ -88,6 +88,32 @@ ros2 topic echo /robot/state
 ros2 topic echo /sock/target_point_map
 ```
 
+## Verify SLAM is Working
+
+**Check SLAM status:**
+```bash
+docker exec docker-vision-1 bash -c "source /opt/vision_ws/install/setup.bash && ros2 topic echo /visual_slam/status --once"
+```
+
+**`vo_state` values:**
+- `0` = NOT_READY (no camera input - check relay nodes)
+- `1` = VISUAL_ONLY (receiving images, waiting for movement/features)
+- `2` = TRACKING (fully operational ✓)
+
+**Verify odometry publishing:**
+```bash
+docker exec docker-vision-1 bash -c "source /opt/vision_ws/install/setup.bash && timeout 3 ros2 topic hz /visual_slam/tracking/odometry"
+```
+- Should show ~15-30Hz when tracking
+- If no output, move robot in circles with rotation for 20-30 seconds
+
+**Check TF transforms:**
+```bash
+docker exec docker-vision-1 bash -c "source /opt/vision_ws/install/setup.bash && ros2 run tf2_ros tf2_echo map odom"
+```
+- If working: shows transform updates
+- If "map does not exist": SLAM not tracking yet, keep moving robot
+
 ## Key Topics
 
 - `/camera/*` - RealSense camera streams

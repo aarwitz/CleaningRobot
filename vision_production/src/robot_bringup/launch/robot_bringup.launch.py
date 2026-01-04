@@ -136,7 +136,40 @@ def generate_launch_description():
         }.items()
     )
     
-    # 2. Visual SLAM
+    # 2. Visual SLAM - with relay nodes for topic remapping
+    # Isaac ROS Visual SLAM expects specific topic names, so we relay camera topics
+    slam_relay_left_image = Node(
+        package='topic_tools',
+        executable='relay',
+        name='slam_relay_left_image',
+        arguments=['/camera/infra1/image_rect_raw', '/visual_slam/image_0'],
+        condition=IfCondition(enable_slam)
+    )
+    
+    slam_relay_right_image = Node(
+        package='topic_tools',
+        executable='relay',
+        name='slam_relay_right_image',
+        arguments=['/camera/infra2/image_rect_raw', '/visual_slam/image_1'],
+        condition=IfCondition(enable_slam)
+    )
+    
+    slam_relay_left_info = Node(
+        package='topic_tools',
+        executable='relay',
+        name='slam_relay_left_info',
+        arguments=['/camera/infra1/camera_info', '/visual_slam/camera_info_0'],
+        condition=IfCondition(enable_slam)
+    )
+    
+    slam_relay_right_info = Node(
+        package='topic_tools',
+        executable='relay',
+        name='slam_relay_right_info',
+        arguments=['/camera/infra2/camera_info', '/visual_slam/camera_info_1'],
+        condition=IfCondition(enable_slam)
+    )
+    
     visual_slam_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([
@@ -146,12 +179,7 @@ def generate_launch_description():
             ])
         ]),
         launch_arguments={
-            'stereo_camera/left/image': '/camera/infra1/image_rect_raw',
-            'stereo_camera/left/camera_info': '/camera/infra1/camera_info',
-            'stereo_camera/right/image': '/camera/infra2/image_rect_raw',
-            'stereo_camera/right/camera_info': '/camera/infra2/camera_info',
-            'visual_slam/imu': '/camera/imu',
-            'enable_imu_fusion': 'True',
+            'enable_imu_fusion': 'False',  # Disable IMU for simplicity
             'enable_rectified_pose': 'True',
             'rectified_images': 'True',
             'enable_slam_visualization': 'True',
@@ -366,6 +394,10 @@ def generate_launch_description():
         
         # Nodes/launches
         realsense_launch,
+        slam_relay_left_image,
+        slam_relay_right_image,
+        slam_relay_left_info,
+        slam_relay_right_info,
         visual_slam_launch,
         vision_container,
         yolo_encoder_launch,

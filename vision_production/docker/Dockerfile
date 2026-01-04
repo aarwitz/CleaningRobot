@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     ros-humble-slam-toolbox \
     ros-humble-robot-state-publisher \
     ros-humble-xacro \
+    ros-humble-topic-tools \
     usbutils \
     i2c-tools \
  && rm -rf /var/lib/apt/lists/*
