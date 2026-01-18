@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="cleaning_robot">
+  
+  <!-- Base link - center of robot -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.3 0.3 0.1"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0 0 0.8 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- Camera link - RealSense D455 mount -->
+  <link name="camera_link">
+    <visual>
+      <geometry>
+        <box size="0.026 0.124 0.029"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- Joint: base_link to camera_link -->
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <!-- Camera mounted 10cm forward, 20cm up from base center -->
+    <origin xyz="0.1 0 0.2" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Camera optical frames (published by realsense2_camera) -->
+  <!-- These are defined by the RealSense driver, but we include the camera_link
+       which is the parent frame that the driver's frames will be relative to -->
+
+</robot>

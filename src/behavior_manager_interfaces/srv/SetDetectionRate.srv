@@ -1,0 +1,5 @@
+# Custom service for setting detection rate
+float32 rate_hz  # Desired detection rate (Hz)
+---
+bool success
+string message
