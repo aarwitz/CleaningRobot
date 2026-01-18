@@ -13,7 +13,7 @@ vision_production/
 ├── docker/
 │   ├── Dockerfile         # Builds workspace with colcon
 │   └── docker-compose.yml # Runtime configuration
-├── models/                # YOLO models (socks2.onnx, socks2.plan)
+├── models/                # YOLO models (clothes2.onnx, clothes2.plan)
 ├── scripts/
 │   └── entrypoint.sh     # Single launch command
 ├── QUICKSTART.md         # This file
@@ -140,10 +140,10 @@ All controlled by a single state machine in `behavior_manager_node.py`.
 
 **No camera topics:** Check USB connection (must be USB 3.0 blue port)
 **No SLAM odometry:** Move camera around, ensure textured environment  
-**No sock detections:** Verify model at `/models/socks2.onnx` and `/models/socks2.plan`
+**No sock detections:** Verify model at `/models/clothes2.onnx` and `/models/clothes2.plan`
 **TF errors:** Wait for SLAM to initialize and publish transforms
-**"No valid depth in window":** Socks detected but no depth data available. This happens when:
-  - Socks are too close to camera (< 20cm)
-  - Socks are dark/fabric that absorbs infrared
-  - Socks are lying flat on surface at steep angle
-  - Try moving socks 30-50cm away from camera with better IR reflection
+**"No valid depth in window":** clothes detected but no depth data available. This happens when:
+  - clothes are too close to camera (< 20cm)
+  - clothes are dark/fabric that absorbs infrared
+  - clothes are lying flat on surface at steep angle
+  - Try moving clothes 30-50cm away from camera with better IR reflection

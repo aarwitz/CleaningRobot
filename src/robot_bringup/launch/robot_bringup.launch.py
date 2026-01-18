@@ -69,12 +69,12 @@ def generate_launch_description():
     )
     
     model_file_arg = DeclareLaunchArgument(
-        'model_file_path', default_value='/models/socks2.onnx',
+        'model_file_path', default_value='/models/clothes2.onnx',
         description='Path to YOLO ONNX model'
     )
     
     engine_file_arg = DeclareLaunchArgument(
-        'engine_file_path', default_value='/models/socks2.plan',
+        'engine_file_path', default_value='/models/clothes2.plan',
         description='Path to TensorRT engine file'
     )
     

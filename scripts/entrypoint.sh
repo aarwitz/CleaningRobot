@@ -33,7 +33,7 @@ echo "[entrypoint] - Behavior: ${ENABLE_BEHAVIOR:-true}"
 echo "[entrypoint] - Nav2: ${ENABLE_NAV2:-false}"
 echo "[entrypoint] - Camera: ${CAM_W:-640}x${CAM_H:-480}"
 echo "[entrypoint] - Network: ${NET_W:-640}x${NET_H:-640}"
-echo "[entrypoint] - Model: ${MODEL_FILE_PATH:-/models/socks2.onnx}"
+echo "[entrypoint] - Model: ${MODEL_FILE_PATH:-/models/clothes2.onnx}"
 echo "[entrypoint] =========================================="
 
 # Launch unified robot bringup
@@ -47,8 +47,8 @@ exec ros2 launch robot_bringup robot_bringup.launch.py \
     cam_h:="${CAM_H:-480}" \
     net_w:="${NET_W:-640}" \
     net_h:="${NET_H:-640}" \
-    model_file_path:="${MODEL_FILE_PATH:-/models/socks2.onnx}" \
-    engine_file_path:="${ENGINE_FILE_PATH:-/models/socks2.plan}" \
+    model_file_path:="${MODEL_FILE_PATH:-/models/clothes2.onnx}" \
+    engine_file_path:="${ENGINE_FILE_PATH:-/models/clothes2.plan}" \
     confidence_threshold:="${CONF_TH:-0.65}" \
     nms_threshold:="${NMS_TH:-0.45}" \
     num_classes:="${NUM_CLASSES:-1}"
