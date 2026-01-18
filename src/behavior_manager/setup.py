@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='user',
     maintainer_email='user@example.com',
-    description='State machine orchestrator for sock-collecting robot',
+    description='State machine orchestrator for clothes-collecting robot',
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={

@@ -88,7 +88,7 @@ class ArmBridgeNode(Node):
         # Subscribe to target point for pick operations
         self.target_sub = self.create_subscription(
             PointStamped,
-            '/sock/target_point_camera',
+            '/clothes/target_point_camera',
             self.target_callback,
             10
         )

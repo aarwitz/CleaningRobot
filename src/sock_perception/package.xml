@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>sock_perception</name>
+  <name>clothes_perception</name>
   <version>1.0.0</version>
-  <description>3D sock target extraction from YOLO + depth</description>
+  <description>3D clothes target extraction from YOLO + depth</description>
   <maintainer email="user@example.com">user</maintainer>
   <license>Apache-2.0</license>
 

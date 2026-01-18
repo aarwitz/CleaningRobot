@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sock Perception Node - Efficient 2D detection relay + on-demand 3D lookup
+Clothes Perception Node - Efficient 2D detection relay + on-demand 3D lookup
 
 Subscribes to:
   - /yolo/detections (vision_msgs/Detection2DArray)
@@ -8,12 +8,12 @@ Subscribes to:
   - /camera/color/camera_info (sensor_msgs/CameraInfo)
 
 Publishes:
-  - /sock/detected (vision_msgs/Detection2D) - best sock detection (2D only)
+  - /clothes/detected (vision_msgs/Detection2D) - best clothes detection (2D only)
 
 Services:
-  - /sock_perception/enable (std_srvs/SetBool)
-  - /sock_perception/reset_target (std_srvs/Trigger)
-  - /sock_perception/get_sock_3d (behavior_manager/GetSock3D) - compute 3D on-demand
+  - /clothes_perception/enable (std_srvs/SetBool)
+  - /clothes_perception/reset_target (std_srvs/Trigger)
+  - /clothes_perception/get_clothes_3d (behavior_manager/GetClothes3D) - compute 3D on-demand
 
 Algorithm:
   Lightweight mode (continuous):
@@ -39,12 +39,12 @@ from vision_msgs.msg import Detection2DArray, Detection2D
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PointStamped
 from std_srvs.srv import SetBool, Trigger
-from behavior_manager_interfaces.srv import GetSock3D
+from behavior_manager_interfaces.srv import GetClothes3D
 
 
-class SockPerceptionNode(Node):
+class ClothesPerceptionNode(Node):
     def __init__(self):
-        super().__init__('sock_perception_node')
+        super().__init__('clothes_perception_node')
         
         # Parameters
         self.declare_parameter('confidence_threshold', 0.7)
@@ -92,26 +92,26 @@ class SockPerceptionNode(Node):
         # Publishers - lightweight 2D only
         self.detection_pub = self.create_publisher(
             Detection2D,
-            '/sock/detected',
+            '/clothes/detected',
             10
         )
         
         # Services
         self.get_3d_srv = self.create_service(
-            GetSock3D,
-            '/sock_perception/get_sock_3d',
-            self.get_sock_3d_callback
+            GetClothes3D,
+            '/clothes_perception/get_clothes_3d',
+            self.get_clothes_3d_callback
         )
         
         self.enable_srv = self.create_service(
             SetBool,
-            '/sock_perception/enable',
+            '/clothes_perception/enable',
             self.enable_callback
         )
         
         self.reset_srv = self.create_service(
             Trigger,
-            '/sock_perception/reset_target',
+            '/clothes_perception/reset_target',
             self.reset_callback
         )
         
@@ -123,7 +123,7 @@ class SockPerceptionNode(Node):
         # Debug throttling
         self.last_debug_time = self.get_clock().now()
         
-        self.get_logger().info(f'Sock perception initialized (rate: {rate_hz} Hz, enabled: {self.enabled})')
+        self.get_logger().info(f'Clothes perception initialized (rate: {rate_hz} Hz, enabled: {self.enabled})')
     
     def network_to_image_coords(self, u_net: float, v_net: float) -> tuple:
         """
@@ -159,7 +159,7 @@ class SockPerceptionNode(Node):
         
         return u_img, v_img
     
-    def get_sock_3d_callback(self, request: GetSock3D.Request, response: GetSock3D.Response):
+    def get_clothes_3d_callback(self, request: GetClothes3D.Request, response: GetClothes3D.Response):
         """On-demand 3D lookup - only called when entering PICK state"""
         if self.camera_info is None:
             response.success = False
@@ -204,7 +204,7 @@ class SockPerceptionNode(Node):
         """Enable/disable perception processing"""
         self.enabled = request.data
         response.success = True
-        response.message = f'Sock perception {"enabled" if self.enabled else "disabled"}'
+        response.message = f'Clothes perception {"enabled" if self.enabled else "disabled"}'
         self.get_logger().info(response.message)
         return response
     
@@ -267,7 +267,7 @@ class SockPerceptionNode(Node):
         msg = self.pending_detection
         self.pending_detection = None
         
-        # Find best sock detection
+        # Find best clothes detection
         best_detection = None
         best_confidence = self.get_parameter('confidence_threshold').value
         
@@ -386,7 +386,7 @@ class SockPerceptionNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = SockPerceptionNode()
+    node = ClothesPerceptionNode()
     
     try:
         rclpy.spin(node)

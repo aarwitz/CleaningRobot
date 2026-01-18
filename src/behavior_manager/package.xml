@@ -3,7 +3,7 @@
 <package format="3">
   <name>behavior_manager</name>
   <version>1.0.0</version>
-  <description>State machine orchestrator for sock-collecting robot</description>
+  <description>State machine orchestrator for clothes-collecting robot</description>
   <maintainer email="user@example.com">user</maintainer>
   <license>Apache-2.0</license>
 

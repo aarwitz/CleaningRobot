@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Behavior Manager Node - State machine for sock-collecting robot
+Behavior Manager Node - State machine for clothes-collecting robot
 
-States: WANDER → APPROACH_SOCK → PICK → GO_TO_BASKET → PLACE → (RECOVER) → WANDER
+States: WANDER → APPROACH_CLOTHES → PICK → GO_TO_BASKET → PLACE → (RECOVER) → WANDER
 
 Navigation (SLAM + Nav2) always runs.
 Perception is gated (enabled/disabled) based on state.
@@ -23,13 +23,13 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
 from vision_msgs.msg import Detection2D
-from behavior_manager_interfaces.srv import GetSock3D
+from behavior_manager_interfaces.srv import GetClothes3D
 
 
 class RobotState(Enum):
     """Robot behavior states"""
     WANDER = auto()
-    APPROACH_SOCK = auto()
+    APPROACH_CLOTHES = auto()
     PICK = auto()
     GO_TO_BASKET = auto()
     PLACE = auto()
@@ -42,7 +42,7 @@ class BehaviorManagerNode(Node):
     
     Controls:
     - Nav2 goals (ONLY source of navigation commands)
-    - Perception gating (enable/disable sock detection)
+    - Perception gating (enable/disable clothes detection)
     - Arm manipulation (via service calls)
     - State transitions based on environment feedback
     """
@@ -53,9 +53,9 @@ class BehaviorManagerNode(Node):
         # Parameters
         self.declare_parameter('wander_radius_m', 3.0)
         self.declare_parameter('wander_timeout_s', 30.0)
-        self.declare_parameter('sock_confidence_threshold', 0.7)
-        self.declare_parameter('sock_stable_frames_required', 5)
-        self.declare_parameter('sock_stable_time_s', 2.0)
+        self.declare_parameter('clothes_confidence_threshold', 0.7)
+        self.declare_parameter('clothes_stable_frames_required', 5)
+        self.declare_parameter('clothes_stable_time_s', 2.0)
         self.declare_parameter('grasp_offset_m', 0.30)
         self.declare_parameter('approach_stop_distance_m', 0.35)
         self.declare_parameter('goal_update_threshold_m', 0.10)
@@ -72,12 +72,12 @@ class BehaviorManagerNode(Node):
         self.current_state = RobotState.WANDER
         self.state_enter_time = time.time()
         
-        # Sock tracking
+        # Clothes tracking
         self.latest_detection: Detection2D = None  # 2D only during WANDER/APPROACH
-        self.sock_target: PoseStamped = None  # 3D position from service call
-        self.sock_first_seen_time = None
-        self.sock_frame_count = 0
-        self.last_sock_update_time = 0.0
+        self.clothes_target: PoseStamped = None  # 3D position from service call
+        self.clothes_first_seen_time = None
+        self.clothes_frame_count = 0
+        self.last_clothes_update_time = 0.0
         
         # Navigation
         self.current_odom: Odometry = None
@@ -92,11 +92,11 @@ class BehaviorManagerNode(Node):
         
         # Service clients
         self.perception_enable_client = self.create_client(
-            SetBool, '/sock_perception/enable')
+            SetBool, '/clothes_perception/enable')
         self.perception_reset_client = self.create_client(
-            Trigger, '/sock_perception/reset_target')
-        self.get_sock_3d_client = self.create_client(
-            GetSock3D, '/sock_perception/get_sock_3d')
+            Trigger, '/clothes_perception/reset_target')
+        self.get_clothes_3d_client = self.create_client(
+            GetClothes3D, '/clothes_perception/get_clothes_3d')
         
         # Would be arm service clients (stubs for now)
         # self.arm_pick_client = self.create_client(...)
@@ -107,10 +107,10 @@ class BehaviorManagerNode(Node):
             self, NavigateToPose, 'navigate_to_pose')
         
         # Subscribers
-        self.sock_detection_sub = self.create_subscription(
+        self.clothes_detection_sub = self.create_subscription(
             Detection2D,
-            '/sock/detected',
-            self.sock_detection_callback,
+            '/clothes/detected',
+            self.clothes_detection_callback,
             10
         )
         
@@ -140,8 +140,8 @@ class BehaviorManagerNode(Node):
         # Check transitions based on current state
         if self.current_state == RobotState.WANDER:
             self.update_wander()
-        elif self.current_state == RobotState.APPROACH_SOCK:
-            self.update_approach_sock()
+        elif self.current_state == RobotState.APPROACH_CLOTHES:
+            self.update_approach_clothes()
         elif self.current_state == RobotState.PICK:
             self.update_pick()
         elif self.current_state == RobotState.GO_TO_BASKET:
@@ -167,8 +167,8 @@ class BehaviorManagerNode(Node):
         # Call enter function
         if new_state == RobotState.WANDER:
             self.enter_wander()
-        elif new_state == RobotState.APPROACH_SOCK:
-            self.enter_approach_sock()
+        elif new_state == RobotState.APPROACH_CLOTHES:
+            self.enter_approach_clothes()
         elif new_state == RobotState.PICK:
             self.enter_pick()
         elif new_state == RobotState.GO_TO_BASKET:
@@ -189,21 +189,21 @@ class BehaviorManagerNode(Node):
         self.set_perception_enabled(True)
         self.get_logger().info(f'Perception enabled at {rate_hz} Hz')
         
-        # Reset sock tracking
+        # Reset clothes tracking
         self.call_perception_reset()
         self.latest_detection = None
-        self.sock_target = None
-        self.sock_first_seen_time = None
-        self.sock_frame_count = 0
+        self.clothes_target = None
+        self.clothes_first_seen_time = None
+        self.clothes_frame_count = 0
         
         # Send random wander goal
         self.send_random_wander_goal()
     
     def update_wander(self):
-        """Check for sock detection or wander timeout"""
-        # Check if sock detected and stable
-        if self.is_sock_stable():
-            self.transition_to(RobotState.APPROACH_SOCK)
+        """Check for clothes detection or wander timeout"""
+        # Check if clothes detected and stable
+        if self.is_clothes_stable():
+            self.transition_to(RobotState.APPROACH_CLOTHES)
             return
         
         # Check wander timeout - send new goal
@@ -244,11 +244,11 @@ class BehaviorManagerNode(Node):
         self.send_nav_goal(goal)
         self.get_logger().info(f'Wander goal: ({goal_x:.2f}, {goal_y:.2f})')
     
-    # ==================== State: APPROACH_SOCK ====================
+    # ==================== State: APPROACH_CLOTHES ====================
     
-    def enter_approach_sock(self):
-        """Cancel wander, enable moderate perception, approach sock"""
-        self.get_logger().info('Entering APPROACH_SOCK')
+    def enter_approach_clothes(self):
+        """Cancel wander, enable moderate perception, approach clothes"""
+        self.get_logger().info('Entering APPROACH_CLOTHES')
         
         # Cancel any existing goal
         self.cancel_nav_goal()
@@ -259,26 +259,26 @@ class BehaviorManagerNode(Node):
         self.get_logger().info(f'Perception rate increased to {rate_hz} Hz')
         
         # Send initial approach goal
-        if self.sock_target:
-            self.send_approach_goal(self.sock_target)
+        if self.clothes_target:
+            self.send_approach_goal(self.clothes_target)
     
-    def update_approach_sock(self):
-        """Update Nav2 goal as sock target moves, check arrival"""
-        # Check if sock lost
-        time_since_update = time.time() - self.last_sock_update_time
+    def update_approach_clothes(self):
+        """Update Nav2 goal as clothes target moves, check arrival"""
+        # Check if clothes lost
+        time_since_update = time.time() - self.last_clothes_update_time
         if time_since_update > 5.0:
-            self.get_logger().warn('Sock lost during approach')
+            self.get_logger().warn('Clothes lost during approach')
             self.transition_to(RobotState.RECOVER)
             return
         
         # Check if close enough to pick
-        if self.is_near_sock():
+        if self.is_near_clothes():
             self.transition_to(RobotState.PICK)
             return
         
         # Update goal if target moved significantly
-        if self.sock_target:
-            self.update_approach_goal(self.sock_target)
+        if self.clothes_target:
+            self.update_approach_goal(self.clothes_target)
         
         # Check timeout
         elapsed = time.time() - self.state_enter_time
@@ -288,14 +288,14 @@ class BehaviorManagerNode(Node):
             self.transition_to(RobotState.RECOVER)
     
     def send_approach_goal(self, target: PoseStamped):
-        """Send Nav2 goal offset from sock by grasp distance"""
+        """Send Nav2 goal offset from clothes by grasp distance"""
         if self.current_odom is None:
             return
         
-        # Compute approach pose (offset from sock toward robot)
+        # Compute approach pose (offset from clothes toward robot)
         grasp_offset = self.get_parameter('grasp_offset_m').value
         
-        # Vector from robot to sock
+        # Vector from robot to clothes
         dx = target.pose.position.x - self.current_odom.pose.pose.position.x
         dy = target.pose.position.y - self.current_odom.pose.pose.position.y
         dist = math.sqrt(dx**2 + dy**2)
@@ -307,7 +307,7 @@ class BehaviorManagerNode(Node):
         ux = dx / dist
         uy = dy / dist
         
-        # Goal is grasp_offset before the sock
+        # Goal is grasp_offset before the clothes
         goal = PoseStamped()
         goal.header.frame_id = 'map'
         goal.header.stamp = self.get_clock().now().to_msg()
@@ -315,7 +315,7 @@ class BehaviorManagerNode(Node):
         goal.pose.position.y = target.pose.position.y - grasp_offset * uy
         goal.pose.position.z = 0.0
         
-        # Orient toward sock
+        # Orient toward clothes
         goal.pose.orientation.w = math.cos(math.atan2(dy, dx) / 2)
         goal.pose.orientation.z = math.sin(math.atan2(dy, dx) / 2)
         
@@ -345,13 +345,13 @@ class BehaviorManagerNode(Node):
             self.get_logger().info(f'Updating goal (moved {dist_moved:.2f}m)')
             self.send_approach_goal(target)
     
-    def is_near_sock(self) -> bool:
-        """Check if robot is within grasp distance of sock"""
-        if self.sock_target is None or self.current_odom is None:
+    def is_near_clothes(self) -> bool:
+        """Check if robot is within grasp distance of clothes"""
+        if self.clothes_target is None or self.current_odom is None:
             return False
         
-        dx = self.sock_target.pose.position.x - self.current_odom.pose.pose.position.x
-        dy = self.sock_target.pose.position.y - self.current_odom.pose.pose.position.y
+        dx = self.clothes_target.pose.position.x - self.current_odom.pose.pose.position.x
+        dy = self.clothes_target.pose.position.y - self.current_odom.pose.pose.position.y
         dist = math.sqrt(dx**2 + dy**2)
         
         stop_dist = self.get_parameter('approach_stop_distance_m').value
@@ -360,7 +360,7 @@ class BehaviorManagerNode(Node):
     # ==================== State: PICK ====================
     
     def enter_pick(self):
-        """Stop base, call 3D service, pick sock"""
+        """Stop base, call 3D service, pick clothes"""
         self.get_logger().info('Entering PICK')
         
         # Cancel Nav2 goal
@@ -378,13 +378,13 @@ class BehaviorManagerNode(Node):
             self.transition_to(RobotState.RECOVER)
             return
         
-        self.get_logger().info('Calling GetSock3D service for precise position')
-        request = GetSock3D.Request()
+        self.get_logger().info('Calling GetClothes3D service for precise position')
+        request = GetClothes3D.Request()
         request.detection = self.latest_detection
         
         # Call service asynchronously
-        future = self.get_sock_3d_client.call_async(request)
-        future.add_done_callback(self.handle_sock_3d_response)
+        future = self.get_clothes_3d_client.call_async(request)
+        future.add_done_callback(self.handle_clothes_3d_response)
         
         # Call arm pick service (stub)
         self.pick_success = False
@@ -448,7 +448,7 @@ class BehaviorManagerNode(Node):
     # ==================== State: PLACE ====================
     
     def enter_place(self):
-        """Place sock in basket"""
+        """Place clothes in basket"""
         self.get_logger().info('Entering PLACE')
         
         # Stop base
@@ -491,7 +491,7 @@ class BehaviorManagerNode(Node):
         self.set_perception_enabled(True)
         
         # Reset state
-        self.sock_target = None
+        self.clothes_target = None
         self.pick_success = False
         self.place_success = False
     
@@ -505,21 +505,21 @@ class BehaviorManagerNode(Node):
     
     # ==================== Helper Functions ====================
     
-    def is_sock_stable(self) -> bool:
-        """Check if sock has been tracked consistently"""
+    def is_clothes_stable(self) -> bool:
+        """Check if clothes has been tracked consistently"""
         if self.latest_detection is None:
             return False
         
-        required_frames = self.get_parameter('sock_stable_frames_required').value
-        required_time = self.get_parameter('sock_stable_time_s').value
+        required_frames = self.get_parameter('clothes_stable_frames_required').value
+        required_time = self.get_parameter('clothes_stable_time_s').value
         
-        if self.sock_frame_count < required_frames:
+        if self.clothes_frame_count < required_frames:
             return False
         
-        if self.sock_first_seen_time is None:
+        if self.clothes_first_seen_time is None:
             return False
         
-        elapsed = time.time() - self.sock_first_seen_time
+        elapsed = time.time() - self.clothes_first_seen_time
         return elapsed >= required_time
     
     def stop_base(self):
@@ -530,7 +530,7 @@ class BehaviorManagerNode(Node):
         self.get_logger().info('Base stopped')
     
     def set_perception_enabled(self, enabled: bool):
-        """Enable/disable sock perception"""
+        """Enable/disable clothes perception"""
         if not self.perception_enable_client.wait_for_service(timeout_sec=0.5):
             self.get_logger().warn('Perception enable service not available', throttle_duration_sec=5.0)
             return
@@ -542,7 +542,7 @@ class BehaviorManagerNode(Node):
         # Don't block on response
     
     def call_perception_reset(self):
-        """Reset sock target in perception"""
+        """Reset clothes target in perception"""
         if not self.perception_reset_client.wait_for_service(timeout_sec=0.5):
             return
         
@@ -590,34 +590,34 @@ class BehaviorManagerNode(Node):
     
     # ==================== Callbacks ====================
     
-    def sock_detection_callback(self, msg: Detection2D):
+    def clothes_detection_callback(self, msg: Detection2D):
         """Receive lightweight 2D detection from perception"""
         self.latest_detection = msg
-        self.last_sock_update_time = time.time()
+        self.last_clothes_update_time = time.time()
         
         # Track stability
-        if self.sock_first_seen_time is None:
-            self.sock_first_seen_time = time.time()
+        if self.clothes_first_seen_time is None:
+            self.clothes_first_seen_time = time.time()
         
-        self.sock_frame_count += 1
+        self.clothes_frame_count += 1
     
-    def handle_sock_3d_response(self, future):
+    def handle_clothes_3d_response(self, future):
         """Handle 3D position service response"""
         try:
             response = future.result()
             if response.success:
                 # Convert PointStamped to PoseStamped for compatibility
-                self.sock_target = PoseStamped()
-                self.sock_target.header = response.point.header
-                self.sock_target.pose.position = response.point.point
-                self.sock_target.pose.orientation.w = 1.0  # Identity orientation
+                self.clothes_target = PoseStamped()
+                self.clothes_target.header = response.point.header
+                self.clothes_target.pose.position = response.point.point
+                self.clothes_target.pose.orientation.w = 1.0  # Identity orientation
                 
                 self.get_logger().info(
                     f'Got 3D position: ({response.point.point.x:.3f}, '
                     f'{response.point.point.y:.3f}, {response.point.point.z:.3f})'
                 )
                 
-                # In real system, would pass sock_target to arm controller here
+                # In real system, would pass clothes_target to arm controller here
             else:
                 self.get_logger().warn(f'3D service failed: {response.message}')
                 self.transition_to(RobotState.RECOVER)

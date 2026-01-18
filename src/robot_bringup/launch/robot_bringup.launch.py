@@ -6,7 +6,7 @@ Single launch file that brings up the entire robot system:
 - RealSense camera
 - Visual SLAM
 - YOLOv8 perception
-- Sock perception node
+- Clothes perception node
 - Behavior manager
 - Arm bridge (stub)
 - Robot state publisher
@@ -124,7 +124,7 @@ def generate_launch_description():
             'enable_infra2': 'true',
             'enable_gyro': 'true',
             'enable_accel': 'true',
-            'align_depth.enable': 'true',  # CRITICAL: Need aligned depth for sock perception
+            'align_depth.enable': 'true',  # CRITICAL: Need aligned depth for clothes perception
             'enable_sync': 'false',
             'rgb_camera.profile': [cam_w, TextSubstitution(text='x'), cam_h, TextSubstitution(text='x30')],
             'depth_module.profile': '640x480x30',
@@ -259,11 +259,11 @@ def generate_launch_description():
         condition=IfCondition(enable_yolo)
     )
     
-    # 4. Sock perception node
-    sock_perception_node = Node(
-        package='sock_perception',
-        executable='sock_perception_node',
-        name='sock_perception_node',
+    # 4. Clothes perception node
+    clothes_perception_node = Node(
+        package='clothes_perception',
+        executable='clothes_perception_node',
+        name='clothes_perception_node',
         parameters=[{
             'confidence_threshold': 0.7,
             'temporal_filter_size': 5,
@@ -285,9 +285,9 @@ def generate_launch_description():
         parameters=[{
             'wander_radius_m': 3.0,
             'wander_timeout_s': 30.0,
-            'sock_confidence_threshold': 0.7,
-            'sock_stable_frames_required': 5,
-            'sock_stable_time_s': 2.0,
+            'clothes_confidence_threshold': 0.7,
+            'clothes_stable_frames_required': 5,
+            'clothes_stable_time_s': 2.0,
             'grasp_offset_m': 0.30,
             'approach_stop_distance_m': 0.35,
             'goal_update_threshold_m': 0.10,
@@ -401,7 +401,7 @@ def generate_launch_description():
         visual_slam_launch,
         vision_container,
         yolo_encoder_launch,
-        sock_perception_node,
+        clothes_perception_node,
         behavior_manager_node,
         motor_controller_node,
         arm_bridge_node,

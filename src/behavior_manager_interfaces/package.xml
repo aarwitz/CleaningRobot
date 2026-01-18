@@ -3,7 +3,7 @@
 <package format="3">
   <name>behavior_manager_interfaces</name>
   <version>1.0.0</version>
-  <description>Custom service definitions for sock-collecting robot behavior manager</description>
+  <description>Custom service definitions for clothes-collecting robot behavior manager</description>
   <maintainer email="user@example.com">user</maintainer>
   <license>Apache-2.0</license>
 
