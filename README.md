@@ -122,7 +122,7 @@ CleaningRobot/
 │   ├── behavior_manager_interfaces/
 │   ├── motor_controller/
 │   ├── robot_bringup/
-│   └── sock_perception/
+│   └── clothes_perception/
 ├── generate_project_snapshot.sh
 ├── newoutput.txt
 ├── README.md
