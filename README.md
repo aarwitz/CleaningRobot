@@ -3,7 +3,7 @@
 ## Build and Run
 
 ```bash
-cd /home/taylor/workspaces/CleaningRobot
+cd ~/workspaces/CleaningRobot
 
 # Build
 docker compose -f docker/docker-compose.yml build # --no-cache to rebuild
