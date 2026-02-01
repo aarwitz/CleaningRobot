@@ -8,16 +8,15 @@ cd ~/workspaces/CleaningRobot
 # Build
 docker compose -f docker/docker-compose.yml build # --no-cache to rebuild
 
-# Run (this automatically runs entrypoint.sh inside the container)
+# Run (this runs entrypoint.sh inside the container)
 docker compose -f docker/docker-compose.yml up
 ```
 
 **What happens inside the container:**
-The `entrypoint.sh` script automatically runs:
+The `entrypoint.sh` script runs:
 ```bash
 ros2 launch robot_bringup robot_bringup.launch.py
 ```
-You don't need to run this manually - Docker Compose handles it.
 
 ## What's Running
 
@@ -134,12 +133,8 @@ CleaningRobot/
 ## Architecture
 
 ```
-RealSense → Visual SLAM → map→odom TF
+RealSense → Visual SLAM → map→odom TF → Nav2
          → YOLO → clothes Perception → 3D Point
-                                  ↓
-                          Behavior Manager
-                                  ↓
-                               Nav2 (optional)
 ```
 
 All controlled by a single state machine in `behavior_manager_node.py`.

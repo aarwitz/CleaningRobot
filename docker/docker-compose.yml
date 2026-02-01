@@ -18,14 +18,21 @@ services:
       CONF_TH: "0.65"
       NMS_TH: "0.45"
       NUM_CLASSES: "1"
-      ENABLE_SLAM: "true"
-      ENABLE_YOLO: "true"
-      ENABLE_BEHAVIOR: "true"
+      CAMERA_ONLY: "true"
+      ENABLE_SLAM: "false"
+      ENABLE_YOLO: "false"
+      ALIGN_DEPTH: "false"
+      ENABLE_DEPTH: "false"
+      ENABLE_COLOR: "false"
+      ENABLE_ARM: "false"
+      ENABLE_IMU: "false"
+      ENABLE_BEHAVIOR: "false"
       ENABLE_NAV2: "false"
     volumes:
       - /dev/bus/usb:/dev/bus/usb
       - /dev/i2c-7:/dev/i2c-7
       - ../src:/opt/vision_ws/src
+      - ../tests:/opt/vision_ws/tests
       - slam_data:/tmp/cuvslam
     devices:
       - /dev/bus/usb

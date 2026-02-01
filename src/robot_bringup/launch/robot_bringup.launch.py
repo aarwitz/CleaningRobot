@@ -15,7 +15,7 @@ NO background bash jobs - everything is a proper ROS2 node/launch include.
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution, Command
@@ -24,10 +24,17 @@ from launch_ros.descriptions import ComposableNode, ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 import os
-
+from launch.conditions import IfCondition
+from launch.substitutions import PythonExpression
 
 def generate_launch_description():
     # Declare arguments
+    camera_only_arg = DeclareLaunchArgument(
+        'camera_only',
+        default_value='false',
+        description='Launch only the RealSense camera (no SLAM, no perception)'
+)
+
     enable_slam_arg = DeclareLaunchArgument(
         'enable_slam', default_value='true',
         description='Enable Visual SLAM'
@@ -47,6 +54,11 @@ def generate_launch_description():
         'enable_nav2', default_value='false',
         description='Enable Nav2 navigation stack'
     )
+
+    enable_arm_arg = DeclareLaunchArgument(
+        'enable_arm', default_value='true',
+        description='Enable Waveshare RoArm bridge node'
+    )
     
     cam_w_arg = DeclareLaunchArgument(
         'cam_w', default_value='640',
@@ -57,7 +69,29 @@ def generate_launch_description():
         'cam_h', default_value='480',
         description='Camera height'
     )
+
+    # depth_profile removed; using fixed profile string to avoid missing launch config
+
+    enable_color_arg = DeclareLaunchArgument(
+        'enable_color', default_value='false',
+        description='Enable RGB/color stream on RealSense'
+    )
+
+    enable_depth_arg = DeclareLaunchArgument(
+        'enable_depth', default_value='false',
+        description='Enable depth stream on RealSense'
+    )
     
+    align_depth_arg = DeclareLaunchArgument(
+        'align_depth_enable', default_value='true',
+        description='Enable depth-to-color alignment in RealSense'
+    )
+    
+    enable_imu_arg = DeclareLaunchArgument(
+        'enable_imu', default_value='false',
+        description='Enable IMU fusion for Visual SLAM'
+    )
+
     net_w_arg = DeclareLaunchArgument(
         'net_w', default_value='640',
         description='YOLO network input width'
@@ -94,12 +128,17 @@ def generate_launch_description():
     )
     
     # Get argument values
+    camera_only = LaunchConfiguration('camera_only')
     enable_slam = LaunchConfiguration('enable_slam')
     enable_yolo = LaunchConfiguration('enable_yolo')
     enable_behavior = LaunchConfiguration('enable_behavior')
     enable_nav2 = LaunchConfiguration('enable_nav2')
+    enable_arm = LaunchConfiguration('enable_arm')
     cam_w = LaunchConfiguration('cam_w')
     cam_h = LaunchConfiguration('cam_h')
+    # depth_profile removed; use literal profile string below
+    enable_color = LaunchConfiguration('enable_color')
+    enable_depth = LaunchConfiguration('enable_depth')
     net_w = LaunchConfiguration('net_w')
     net_h = LaunchConfiguration('net_h')
     model_file_path = LaunchConfiguration('model_file_path')
@@ -107,6 +146,8 @@ def generate_launch_description():
     confidence_threshold = LaunchConfiguration('confidence_threshold')
     nms_threshold = LaunchConfiguration('nms_threshold')
     num_classes = LaunchConfiguration('num_classes')
+    align_depth_enable = LaunchConfiguration('align_depth_enable')
+    enable_imu = LaunchConfiguration('enable_imu')
     
     # 1. RealSense camera
     realsense_launch = IncludeLaunchDescription(
@@ -118,23 +159,39 @@ def generate_launch_description():
             ])
         ]),
         launch_arguments={
-            'enable_color': 'true',
-            'enable_depth': 'true',
+            'enable_color': enable_color,
+            'enable_depth': enable_depth,
+
             'enable_infra1': 'true',
             'enable_infra2': 'true',
-            'enable_gyro': 'true',
-            'enable_accel': 'true',
-            'align_depth.enable': 'true',  # CRITICAL: Need aligned depth for clothes perception
+
+            # CRITICAL: disable per-stream rectification
+            'enable_infra1_rectification': 'false',
+            'enable_infra2_rectification': 'false',
+
+            # Infra profiles (width,height,fps) and enable auto exposure persistently
+            'infra1.profile': '640,480,30',
+            'infra2.profile': '640,480,30',
+            'depth_module.enable_auto_exposure': 'true',
+            'depth_module.emitter_enabled': '0',
+            'enable_infra_emitter': 'false',
+            'emitter_enabled': '0',
+
             'enable_sync': 'false',
-            'rgb_camera.profile': [cam_w, TextSubstitution(text='x'), cam_h, TextSubstitution(text='x30')],
-            'depth_module.profile': '640x480x30',
-            'enable_infra_emitter': 'true',
-            'emitter_enabled': '1',
+
+            'rgb_camera.profile': [
+                cam_w, TextSubstitution(text=','), cam_h, TextSubstitution(text=',30')
+            ],
+
+            'enable_gyro': enable_imu,
+            'enable_accel': enable_imu,
             'gyro_fps': '200',
-            'accel_fps': '100',
-            'unite_imu_method': '1',
-        }.items()
+            'accel_fps': '200',
+            'unite_imu_method': '2',
+            }
+        .items()
     )
+
     
     # 2. Visual SLAM - with relay nodes for topic remapping
     # Isaac ROS Visual SLAM expects specific topic names, so we relay camera topics
@@ -142,16 +199,20 @@ def generate_launch_description():
         package='topic_tools',
         executable='relay',
         name='slam_relay_left_image',
-        arguments=['/camera/infra1/image_rect_raw', '/visual_slam/image_0'],
-        condition=IfCondition(enable_slam)
+        arguments=['/camera/infra1/image_raw', '/visual_slam/image_0'],
+        condition=IfCondition(PythonExpression([
+            "'", enable_slam, "' == 'true' and '",
+            camera_only, "' == 'false'"]))
     )
     
     slam_relay_right_image = Node(
         package='topic_tools',
         executable='relay',
         name='slam_relay_right_image',
-        arguments=['/camera/infra2/image_rect_raw', '/visual_slam/image_1'],
-        condition=IfCondition(enable_slam)
+        arguments=['/camera/infra2/image_raw', '/visual_slam/image_1'],
+        condition=IfCondition(PythonExpression([
+            "'", enable_slam, "' == 'true' and '",
+            camera_only, "' == 'false'"]))
     )
     
     slam_relay_left_info = Node(
@@ -159,7 +220,9 @@ def generate_launch_description():
         executable='relay',
         name='slam_relay_left_info',
         arguments=['/camera/infra1/camera_info', '/visual_slam/camera_info_0'],
-        condition=IfCondition(enable_slam)
+        condition=IfCondition(PythonExpression([
+                "'", enable_slam, "' == 'true' and '",
+                camera_only, "' == 'false'"]))
     )
     
     slam_relay_right_info = Node(
@@ -167,8 +230,12 @@ def generate_launch_description():
         executable='relay',
         name='slam_relay_right_info',
         arguments=['/camera/infra2/camera_info', '/visual_slam/camera_info_1'],
-        condition=IfCondition(enable_slam)
+        condition=IfCondition(PythonExpression([
+                "'", enable_slam, "' == 'true' and '",
+                camera_only, "' == 'false'"]))
     )
+
+    # (No republish relays — driver will publish image_raw when configured)
     
     visual_slam_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -179,9 +246,9 @@ def generate_launch_description():
             ])
         ]),
         launch_arguments={
-            'enable_imu_fusion': 'False',  # Disable IMU for simplicity
+            'enable_imu_fusion': enable_imu,
             'enable_rectified_pose': 'True',
-            'rectified_images': 'True',
+            'rectified_images': 'False',
             'enable_slam_visualization': 'True',
             'map_frame': 'map',
             'odom_frame': 'odom',
@@ -190,7 +257,9 @@ def generate_launch_description():
             'publish_odom_to_base_tf': 'True',
             'publish_map_to_odom_tf': 'True',
         }.items(),
-        condition=IfCondition(enable_slam)
+        condition=IfCondition(PythonExpression([
+                "'", enable_slam, "' == 'true' and '",
+                camera_only, "' == 'false'"]))
     )
     
     # 3. YOLOv8 detection - composable node container
@@ -275,9 +344,11 @@ def generate_launch_description():
             'rate_hz': 5.0,
         }],
         output='screen'
+        ,
+        condition=IfCondition(enable_yolo)
     )
-    
-    # 5. Behavior manager
+
+    # 5. Behavior manager (always launch)
     behavior_manager_node = Node(
         package='behavior_manager',
         executable='behavior_manager_node',
@@ -301,7 +372,10 @@ def generate_launch_description():
             'approach_perception_rate_hz': 8.0,
         }],
         output='screen',
-        condition=IfCondition(enable_behavior)
+        condition=IfCondition(PythonExpression([
+        "'", camera_only, "' == 'false' and '",
+        enable_behavior, "' == 'true'"
+        ]))
     )
     
     # 6. Motor controller (velocity control for Nav2 cmd_vel)
@@ -331,7 +405,8 @@ def generate_launch_description():
             'baud_rate': 115200,
             'enable_arm': True,
         }],
-        output='screen'
+        output='screen',
+        condition=IfCondition(enable_arm)
     )
     
     # 7. Nav2 (optional, for full autonomy)
@@ -372,12 +447,14 @@ def generate_launch_description():
             ),
             'use_sim_time': False,
         }],
-        output='screen'
+        output='screen',
+        condition=IfCondition(enable_nav2)
     )
     
     # Assemble launch description
     return LaunchDescription([
         # Arguments
+        camera_only_arg,
         enable_slam_arg,
         enable_yolo_arg,
         enable_behavior_arg,
@@ -394,6 +471,16 @@ def generate_launch_description():
         
         # Nodes/launches
         realsense_launch,
+        # Ensure camera auto-exposure is applied at startup (fallback)
+        TimerAction(
+            period=3.0,
+            actions=[
+                ExecuteProcess(
+                    cmd=['ros2', 'param', 'set', '/camera/camera', 'depth_module.enable_auto_exposure', 'true'],
+                    output='screen'
+                )
+            ]
+        ),
         slam_relay_left_image,
         slam_relay_right_image,
         slam_relay_left_info,

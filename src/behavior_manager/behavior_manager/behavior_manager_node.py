@@ -21,13 +21,14 @@ from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
-from nav2_msgs.action import NavigateToPose
+# from nav2_msgs.action import NavigateToPose
 from vision_msgs.msg import Detection2D
-from behavior_manager_interfaces.srv import GetClothes3D
+from behavior_manager_interfaces.srv import Get3DPose
 
 
 class RobotState(Enum):
     """Robot behavior states"""
+    DETECT = auto()
     WANDER = auto()
     APPROACH_CLOTHES = auto()
     PICK = auto()
@@ -35,8 +36,27 @@ class RobotState(Enum):
     PLACE = auto()
     RECOVER = auto()
 
-
 class BehaviorManagerNode(Node):
+    # ==================== State: DETECT ====================
+    def enter_detect(self):
+        """Enable minimal perception for detection and depth at aligned depth rate"""
+        self.get_logger().info('Entering DETECT')
+        # Enable perception at aligned depth rate (15 Hz)
+        self.set_perception_enabled(True)
+        # Optionally, set YOLO and camera to 15 Hz via service or parameter if supported
+        # Reset detection state
+        self.latest_detection = None
+        self.clothes_target = None
+        self.clothes_first_seen_time = None
+        self.clothes_frame_count = 0
+        # No navigation, no arm, just detection and depth
+
+    def update_detect(self):
+        """In DETECT mode, process YOLO and aligned depth as fast as possible"""
+        # This function can be called at the same rate as aligned depth publishes
+        # Only publish detection results and 3D centroid if available
+        # No navigation or arm actions in this mode
+        pass
     """
     Central behavior orchestrator
     
@@ -73,14 +93,14 @@ class BehaviorManagerNode(Node):
         self.state_enter_time = time.time()
         
         # Clothes tracking
-        self.latest_detection: Detection2D = None  # 2D only during WANDER/APPROACH
-        self.clothes_target: PoseStamped = None  # 3D position from service call
+        self.latest_detection = None  # 2D only during WANDER/APPROACH
+        self.clothes_target = None  # 3D position from service call
         self.clothes_first_seen_time = None
         self.clothes_frame_count = 0
         self.last_clothes_update_time = 0.0
         
         # Navigation
-        self.current_odom: Odometry = None
+        self.current_odom = None
         self.nav_goal_handle = None
         self.nav_goal_result = None
         self.last_goal_update_time = 0.0
@@ -96,15 +116,15 @@ class BehaviorManagerNode(Node):
         self.perception_reset_client = self.create_client(
             Trigger, '/clothes_perception/reset_target')
         self.get_clothes_3d_client = self.create_client(
-            GetClothes3D, '/clothes_perception/get_clothes_3d')
+            Get3DPose, '/clothes_perception/get_3d_pose')
         
         # Would be arm service clients (stubs for now)
         # self.arm_pick_client = self.create_client(...)
         # self.arm_place_client = self.create_client(...)
         
         # Action clients
-        self.nav_action_client = ActionClient(
-            self, NavigateToPose, 'navigate_to_pose')
+        # self.nav_action_client = ActionClient(
+        #     self, NavigateToPose, 'navigate_to_pose')
         
         # Subscribers
         self.clothes_detection_sub = self.create_subscription(
@@ -128,17 +148,19 @@ class BehaviorManagerNode(Node):
         # State machine timer (10 Hz)
         self.state_timer = self.create_timer(0.1, self.state_machine_update)
         
-        # Initialize to WANDER
-        self.enter_wander()
+        # Initialize to DETECT
+        self.enter_detect()
         
-        self.get_logger().info('Behavior manager initialized in WANDER state')
+        self.get_logger().info('Behavior manager initialized in DETECT state')
     
     # ==================== State Machine Core ====================
     
     def state_machine_update(self):
         """Main state machine loop"""
         # Check transitions based on current state
-        if self.current_state == RobotState.WANDER:
+        if self.current_state == RobotState.DETECT:
+            self.update_detect()
+        elif self.current_state == RobotState.WANDER:
             self.update_wander()
         elif self.current_state == RobotState.APPROACH_CLOTHES:
             self.update_approach_clothes()
@@ -150,7 +172,6 @@ class BehaviorManagerNode(Node):
             self.update_place()
         elif self.current_state == RobotState.RECOVER:
             self.update_recover()
-        
         # Publish current state
         state_msg = String()
         state_msg.data = self.current_state.name
@@ -378,8 +399,8 @@ class BehaviorManagerNode(Node):
             self.transition_to(RobotState.RECOVER)
             return
         
-        self.get_logger().info('Calling GetClothes3D service for precise position')
-        request = GetClothes3D.Request()
+        self.get_logger().info('Calling Get3DPose service for precise position')
+        request = Get3DPose.Request()
         request.detection = self.latest_detection
         
         # Call service asynchronously
@@ -550,17 +571,9 @@ class BehaviorManagerNode(Node):
         future = self.perception_reset_client.call_async(request)
     
     def send_nav_goal(self, pose: PoseStamped):
-        """Send Nav2 action goal"""
-        if not self.nav_action_client.wait_for_server(timeout_sec=0.5):
-            self.get_logger().warn('Nav2 action server not available', throttle_duration_sec=5.0)
-            return
-        
-        goal_msg = NavigateToPose.Goal()
-        goal_msg.pose = pose
-        
-        self.nav_goal_result = None
-        future = self.nav_action_client.send_goal_async(goal_msg)
-        future.add_done_callback(self.nav_goal_response_callback)
+        """Send Nav2 action goal (stubbed)"""
+        # Navigation disabled in minimal DETECT mode
+        pass
     
     def cancel_nav_goal(self):
         """Cancel active Nav2 goal"""

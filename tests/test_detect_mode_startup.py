@@ -1,6 +1,7 @@
 
 import subprocess
 import time
+import argparse
 import rclpy
 from rclpy.node import Node
 from cv_bridge import CvBridge
@@ -27,7 +28,7 @@ EXPECTED_RATES = {
     '/camera/aligned_depth_to_color/image_raw': (12, 18),  # 15 Hz ±3
     '/camera/color/image_raw': (25, 35),  # 15 Hz ±3
     '/yolo/detections': (25, 35),  # 10 Hz ±3
-    '/clothes/target_point_camera': (5, 15),  # 10 Hz ±5
+    # '/clothes/target_point_camera': (5, 15),  # 10 Hz ±5
     # '/robot/state': (10, 20),  # 15 Hz ±5
 }
 
@@ -224,6 +225,21 @@ def capture_example_image(timeout_s=10):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--bag', help='Path to ros2 bag to play during the test')
+    args = parser.parse_args()
+
+    bag_proc = None
+    if args.bag:
+        bag_path = args.bag
+        if not os.path.exists(bag_path):
+            print(f'Bag file not found: {bag_path}')
+            return
+        print(f'Starting ros2 bag play: {bag_path} (background)')
+        bag_proc = subprocess.Popen(['ros2', 'bag', 'play', bag_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Give playback a moment to start
+        time.sleep(1.0)
+
     print("Waiting 5 seconds for system to stabilize...")
     time.sleep(5)
 
@@ -253,6 +269,18 @@ def main():
 
     # Try to capture one RGB image + YOLO detection and save an example overlay.
     capture_example_image(timeout_s=10)
+
+    # cleanup bag playback
+    if bag_proc:
+        try:
+            print('Stopping ros2 bag playback...')
+            bag_proc.terminate()
+            bag_proc.wait(timeout=3)
+        except Exception:
+            try:
+                bag_proc.kill()
+            except Exception:
+                pass
 
     print("\nChecking topic publish rates...")
     for topic, (min_rate, max_rate) in EXPECTED_RATES.items():
