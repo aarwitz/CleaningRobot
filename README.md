@@ -83,12 +83,24 @@ docker exec docker-vision-1 bash -c "source /opt/vision_ws/install/setup.bash &&
 - Should show ~15-30Hz when tracking
 - If no output, move robot in circles with rotation for 20-30 seconds
 
+**Check image relay rates:**
+```bash
+docker exec docker-vision-1 bash -c "source /opt/vision_ws/install/setup.bash && timeout 5 ros2 topic hz /visual_slam/image_0"
+```
+- Should show ~30Hz for stereo input
+- Note: Relay nodes introduce timestamp jitter (this is normal)
+- vSLAM compensates for relay timing with internal buffering
+
 **Check TF transforms:**
 ```bash
 docker exec docker-vision-1 bash -c "source /opt/vision_ws/install/setup.bash && ros2 run tf2_ros tf2_echo map odom"
 ```
 - If working: shows transform updates
 - If "map does not exist": SLAM not tracking yet, keep moving robot
+
+**Expected startup warnings:**
+- `Delta between current and previous frame [117ms] is above threshold [34ms]` - Normal during initialization, happens once
+- Inter-camera timestamp offsets up to 200ms - Artifact of relay nodes, vSLAM handles this internally
 
 ## Key Topics
 

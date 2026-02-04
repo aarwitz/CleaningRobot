@@ -63,12 +63,10 @@ class SlamTimingTester(Node):
         # keep small window of recent timestamps for matching
         self.recent0 = deque(maxlen=1000)
         self.recent1 = deque(maxlen=1000)
-        # Visual SLAM inputs
-        self.sub0 = self.create_subscription(Image, '/visual_slam/image_0', self.cb0, 10)
-        self.sub1 = self.create_subscription(Image, '/visual_slam/image_1', self.cb1, 10)
-        # Raw camera topics (diagnostic)
-        self.cam_sub0 = self.create_subscription(Image, '/camera/infra1/image_rect_raw', self.cam_cb0, 10)
-        self.cam_sub1 = self.create_subscription(Image, '/camera/infra2/image_rect_raw', self.cam_cb1, 10)
+        # Camera raw topics (primary timing source)
+        self.sub0 = self.create_subscription(Image, '/camera/infra1/image_rect_raw', self.cb0, 10)
+        self.sub1 = self.create_subscription(Image, '/camera/infra2/image_rect_raw', self.cb1, 10)
+        # Diagnostic subscribers removed since we're testing camera directly
 
     @staticmethod
     def _to_seconds(stamp):
@@ -97,19 +95,6 @@ class SlamTimingTester(Node):
         if self.recent0:
             nearest = min(self.recent0, key=lambda x: abs(x - t))
             self.cross_diffs.append(nearest - t)
-
-    # Camera diagnostics callbacks
-    def cam_cb0(self, msg: Image):
-        t = self._to_seconds(msg.header.stamp)
-        if len(self.cam_ts0) >= 1:
-            self.cam_intervals0.append(t - self.cam_ts0[-1])
-        self.cam_ts0.append(t)
-
-    def cam_cb1(self, msg: Image):
-        t = self._to_seconds(msg.header.stamp)
-        if len(self.cam_ts1) >= 1:
-            self.cam_intervals1.append(t - self.cam_ts1[-1])
-        self.cam_ts1.append(t)
 
 
 def play_bag_if_requested(bag_path):
@@ -145,19 +130,6 @@ def analyze_results(node: SlamTimingTester, duration):
     else:
         mean_dt1 = std_dt1 = max_dev1 = fps1 = 0.0
 
-    # camera raw rates
-    if len(node.cam_intervals0) >= 1:
-        mean_cam_dt0 = statistics.mean(node.cam_intervals0)
-        fps_cam0 = 1.0 / mean_cam_dt0 if mean_cam_dt0 > 0 else 0.0
-    else:
-        fps_cam0 = 0.0
-
-    if len(node.cam_intervals1) >= 1:
-        mean_cam_dt1 = statistics.mean(node.cam_intervals1)
-        fps_cam1 = 1.0 / mean_cam_dt1 if mean_cam_dt1 > 0 else 0.0
-    else:
-        fps_cam1 = 0.0
-
     # cross-imager offsets
     offsets = [abs(d) * 1e6 for d in node.cross_diffs]  # convert to microseconds
     mean_offset_us = statistics.mean(offsets) if offsets else 0.0
@@ -175,15 +147,14 @@ def analyze_results(node: SlamTimingTester, duration):
     results['samples1'] = len(node.ts1)
 
     print('\n=== SLAM TIMING SUMMARY ===')
-    print(f'image_0 samples: {results["samples0"]}  mean fps: {fps0:.2f}  jitter(std ms): {results["jitter_std_ms_0"]:.3f}  max dev(ms): {results["max_dev_ms_0"]:.3f}')
-    print(f'image_1 samples: {results["samples1"]}  mean fps: {fps1:.2f}  jitter(std ms): {results["jitter_std_ms_1"]:.3f}  max dev(ms): {results["max_dev_ms_1"]:.3f}')
-    print(f'camera infra1 fps: {fps_cam0:.2f}  camera infra2 fps: {fps_cam1:.2f}')
+    print(f'infra1 samples: {results["samples0"]}  mean fps: {fps0:.2f}  jitter(std ms): {results["jitter_std_ms_0"]:.3f}  max dev(ms): {results["max_dev_ms_0"]:.3f}')
+    print(f'infra2 samples: {results["samples1"]}  mean fps: {fps1:.2f}  jitter(std ms): {results["jitter_std_ms_1"]:.3f}  max dev(ms): {results["max_dev_ms_1"]:.3f}')
     print(f'inter-imager mean offset: {mean_offset_us:.1f} us   max offset: {max_offset_us:.1f} us')
 
     # Evaluate against requirements
     ok = True
     if fps0 < TARGET_FPS or fps1 < TARGET_FPS:
-        print(f'FAIL: FPS below target {TARGET_FPS}Hz (image_0 {fps0:.2f}, image_1 {fps1:.2f})')
+        print(f'FAIL: FPS below target {TARGET_FPS}Hz (infra1 {fps0:.2f}, infra2 {fps1:.2f})')
         ok = False
     if results['max_dev_ms_0'] > MAX_JITTER_MS or results['max_dev_ms_1'] > MAX_JITTER_MS:
         print(f'FAIL: Jitter exceeds +/-{MAX_JITTER_MS} ms (max dev ms: img0 {results["max_dev_ms_0"]:.3f}, img1 {results["max_dev_ms_1"]:.3f})')

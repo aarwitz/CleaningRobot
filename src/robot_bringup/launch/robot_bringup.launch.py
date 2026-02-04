@@ -88,7 +88,7 @@ def generate_launch_description():
     )
     
     enable_imu_arg = DeclareLaunchArgument(
-        'enable_imu', default_value='false',
+        'enable_imu', default_value='True',
         description='Enable IMU fusion for Visual SLAM'
     )
 
@@ -177,7 +177,8 @@ def generate_launch_description():
             'enable_infra_emitter': 'false',
             'emitter_enabled': '0',
 
-            'enable_sync': 'false',
+            'enable_sync': 'true',
+            'depth_module.global_time_enabled': 'true',
 
             'rgb_camera.profile': [
                 cam_w, TextSubstitution(text=','), cam_h, TextSubstitution(text=',30')
@@ -193,73 +194,54 @@ def generate_launch_description():
     )
 
     
-    # 2. Visual SLAM - with relay nodes for topic remapping
-    # Isaac ROS Visual SLAM expects specific topic names, so we relay camera topics
-    slam_relay_left_image = Node(
-        package='topic_tools',
-        executable='relay',
-        name='slam_relay_left_image',
-        arguments=['/camera/infra1/image_raw', '/visual_slam/image_0'],
-        condition=IfCondition(PythonExpression([
-            "'", enable_slam, "' == 'true' and '",
-            camera_only, "' == 'false'"]))
-    )
-    
-    slam_relay_right_image = Node(
-        package='topic_tools',
-        executable='relay',
-        name='slam_relay_right_image',
-        arguments=['/camera/infra2/image_raw', '/visual_slam/image_1'],
-        condition=IfCondition(PythonExpression([
-            "'", enable_slam, "' == 'true' and '",
-            camera_only, "' == 'false'"]))
-    )
-    
-    slam_relay_left_info = Node(
-        package='topic_tools',
-        executable='relay',
-        name='slam_relay_left_info',
-        arguments=['/camera/infra1/camera_info', '/visual_slam/camera_info_0'],
-        condition=IfCondition(PythonExpression([
-                "'", enable_slam, "' == 'true' and '",
-                camera_only, "' == 'false'"]))
-    )
-    
-    slam_relay_right_info = Node(
-        package='topic_tools',
-        executable='relay',
-        name='slam_relay_right_info',
-        arguments=['/camera/infra2/camera_info', '/visual_slam/camera_info_1'],
-        condition=IfCondition(PythonExpression([
-                "'", enable_slam, "' == 'true' and '",
-                camera_only, "' == 'false'"]))
-    )
-
-    # (No republish relays — driver will publish image_raw when configured)
-    
-    visual_slam_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            PathJoinSubstitution([
-                FindPackageShare('isaac_ros_visual_slam'),
-                'launch',
-                'isaac_ros_visual_slam.launch.py'
-            ])
-        ]),
-        launch_arguments={
-            'enable_imu_fusion': enable_imu,
-            'enable_rectified_pose': 'True',
-            'rectified_images': 'False',
-            'enable_slam_visualization': 'True',
+    # 2. Visual SLAM - direct topic remapping (no relay nodes for zero latency)
+    visual_slam_node = ComposableNode(
+        name='visual_slam_node',
+        package='isaac_ros_visual_slam',
+        plugin='nvidia::isaac_ros::visual_slam::VisualSlamNode',
+        parameters=[{
+            'enable_image_denoising': False,
+            'rectified_images': False,
+            'enable_imu_fusion': True,
+            'gyro_noise_density': 0.000244,
+            'gyro_random_walk': 0.000019393,
+            'accel_noise_density': 0.001862,
+            'accel_random_walk': 0.003,
+            'calibration_frequency': 200.0,
+            'image_jitter_threshold_ms': 120.00,
+            'enable_rectified_pose': True,
+            'enable_slam_visualization': True,
+            'enable_landmarks_view': True,
+            'enable_observations_view': True,
             'map_frame': 'map',
             'odom_frame': 'odom',
             'base_frame': 'base_link',
-            'input_base_frame': 'camera_link',
-            'publish_odom_to_base_tf': 'True',
-            'publish_map_to_odom_tf': 'True',
-        }.items(),
-        condition=IfCondition(PythonExpression([
-                "'", enable_slam, "' == 'true' and '",
-                camera_only, "' == 'false'"]))
+            'imu_frame': 'camera_gyro_optical_frame',
+            'publish_odom_to_base_tf': True,
+            'publish_map_to_odom_tf': True,
+            'camera_optical_frames': [
+                'camera_infra1_optical_frame',
+                'camera_infra2_optical_frame',
+            ],
+        }],
+        remappings=[
+            ('visual_slam/image_0', '/camera/infra1/image_rect_raw'),
+            ('visual_slam/camera_info_0', '/camera/infra1/camera_info'),
+            ('visual_slam/image_1', '/camera/infra2/image_rect_raw'),
+            ('visual_slam/camera_info_1', '/camera/infra2/camera_info'),
+            ('visual_slam/imu', '/camera/imu'),
+        ],
+        condition=IfCondition(enable_slam)
+    )
+    
+    visual_slam_container = ComposableNodeContainer(
+        name='visual_slam_launch_container',
+        namespace='',
+        package='rclcpp_components',
+        executable='component_container',
+        composable_node_descriptions=[visual_slam_node],
+        output='screen',
+        condition=IfCondition(enable_slam)
     )
     
     # 3. YOLOv8 detection - composable node container
@@ -448,7 +430,7 @@ def generate_launch_description():
             'use_sim_time': False,
         }],
         output='screen',
-        condition=IfCondition(enable_nav2)
+        condition=IfCondition(enable_slam)
     )
     
     # Assemble launch description
@@ -459,8 +441,13 @@ def generate_launch_description():
         enable_yolo_arg,
         enable_behavior_arg,
         enable_nav2_arg,
+        enable_arm_arg,
         cam_w_arg,
         cam_h_arg,
+        enable_color_arg,
+        enable_depth_arg,
+        align_depth_arg,
+        enable_imu_arg,
         net_w_arg,
         net_h_arg,
         model_file_arg,
@@ -472,6 +459,11 @@ def generate_launch_description():
         # Nodes/launches
         realsense_launch,
         # Ensure camera auto-exposure is applied at startup (fallback)
+        # The auto-exposure is what was reducing my acquistion rate
+        # Has to be applied at startup after camera is initialized
+        # https://nvidia-isaac-ros.github.io/v/release-3.1/troubleshooting/hardware_setup.html
+        # links to the issue here: https://github.com/realsenseai/realsense-ros/issues/2507#issuecomment-1411214372
+        # 
         TimerAction(
             period=3.0,
             actions=[
@@ -481,11 +473,7 @@ def generate_launch_description():
                 )
             ]
         ),
-        slam_relay_left_image,
-        slam_relay_right_image,
-        slam_relay_left_info,
-        slam_relay_right_info,
-        visual_slam_launch,
+        visual_slam_container,
         vision_container,
         yolo_encoder_launch,
         clothes_perception_node,
