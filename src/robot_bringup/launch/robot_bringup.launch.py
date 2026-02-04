@@ -60,6 +60,11 @@ def generate_launch_description():
         description='Enable Waveshare RoArm bridge node'
     )
     
+    enable_visualization_arg = DeclareLaunchArgument(
+        'enable_visualization', default_value='true',
+        description='Enable rosbridge for web-based visualization'
+    )
+    
     cam_w_arg = DeclareLaunchArgument(
         'cam_w', default_value='640',
         description='Camera width'
@@ -134,6 +139,7 @@ def generate_launch_description():
     enable_behavior = LaunchConfiguration('enable_behavior')
     enable_nav2 = LaunchConfiguration('enable_nav2')
     enable_arm = LaunchConfiguration('enable_arm')
+    enable_visualization = LaunchConfiguration('enable_visualization')
     cam_w = LaunchConfiguration('cam_w')
     cam_h = LaunchConfiguration('cam_h')
     # depth_profile removed; use literal profile string below
@@ -433,6 +439,26 @@ def generate_launch_description():
         condition=IfCondition(enable_slam)
     )
     
+    # 9. Rosbridge server for web-based visualization
+    rosbridge_server = Node(
+        package='rosbridge_server',
+        executable='rosbridge_websocket',
+        name='rosbridge_websocket',
+        parameters=[{
+            'port': 9090,
+            'address': '0.0.0.0',
+        }],
+        output='screen',
+        condition=IfCondition(enable_visualization)
+    )
+    
+    # 10. HTTP server for web viewer
+    http_server = ExecuteProcess(
+        cmd=['python3', '-m', 'http.server', '8080', '--directory', '/opt/vision_ws'],
+        output='screen',
+        condition=IfCondition(enable_visualization)
+    )
+    
     # Assemble launch description
     return LaunchDescription([
         # Arguments
@@ -442,6 +468,7 @@ def generate_launch_description():
         enable_behavior_arg,
         enable_nav2_arg,
         enable_arm_arg,
+        enable_visualization_arg,
         cam_w_arg,
         cam_h_arg,
         enable_color_arg,
@@ -482,4 +509,6 @@ def generate_launch_description():
         arm_bridge_node,
         nav2_launch,
         robot_state_publisher_node,
+        rosbridge_server,
+        http_server,
     ])

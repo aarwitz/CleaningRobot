@@ -42,11 +42,16 @@ The unified launch file starts:
 Edit `docker/docker-compose.yml` environment variables:
 
 ```yaml
-ENABLE_SLAM: "true"       # Visual SLAM odometry
-ENABLE_YOLO: "true"       # YOLOv8 detection
-ENABLE_BEHAVIOR: "true"   # State machine
-ENABLE_NAV2: "false"      # Navigation stack (disabled by default)
+ENABLE_SLAM: "true"           # Visual SLAM odometry
+ENABLE_YOLO: "true"           # YOLOv8 detection
+ENABLE_BEHAVIOR: "true"       # State machine
+ENABLE_NAV2: "false"          # Navigation stack (disabled by default)
+ENABLE_VISUALIZATION: "true"  # Web-based SLAM viewer
 ```
+
+The system automatically starts:
+- **Rosbridge server** on port 9090 (WebSocket for ROS topics)
+- **HTTP server** on port 8080 (serves viewer.html)
 
 ## Monitor System
 
@@ -65,6 +70,22 @@ ros2 topic echo /clothes/target_point_map
 ```
 
 ## Verify SLAM is Working
+
+**Web Visualization (Recommended):**
+
+Open a browser and navigate to:
+```
+http://<device-ip>:8080/viewer.html
+```
+
+The web viewer shows:
+- Real-time SLAM path (green line)
+- Landmarks/features (orange points)
+- Robot pose (green cone)
+- Live statistics (state, odometry rate, path length)
+- Interactive 3D view (drag to pan, scroll to zoom)
+
+**Command-line checks:**
 
 **Check SLAM status:**
 ```bash

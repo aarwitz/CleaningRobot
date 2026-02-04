@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     ros-humble-robot-state-publisher \
     ros-humble-xacro \
     ros-humble-topic-tools \
+    ros-humble-rosbridge-suite \
     usbutils \
     i2c-tools \
  && rm -rf /var/lib/apt/lists/*
@@ -30,8 +31,9 @@ COPY src /opt/vision_ws/src
 RUN . /opt/ros/humble/setup.sh && \
     colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# Copy models and entrypoint
+# Copy models, viewer, and entrypoint
 COPY models /models
+COPY viewer.html /opt/vision_ws/viewer.html
 COPY scripts/entrypoint.sh /opt/vision_ws/entrypoint.sh
 RUN chmod +x /opt/vision_ws/entrypoint.sh
 

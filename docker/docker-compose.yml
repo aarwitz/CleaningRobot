@@ -8,6 +8,9 @@ services:
     runtime: nvidia
     privileged: true
     restart: always
+    ports:
+      - "9090:9090"  # rosbridge websocket
+      - "8080:8080"  # web viewer
     environment:
       CAM_W: "640"
       CAM_H: "480"
@@ -28,6 +31,7 @@ services:
       ENABLE_IMU: "True"
       ENABLE_BEHAVIOR: "false"
       ENABLE_NAV2: "false"
+      ENABLE_VISUALIZATION: "true"
     volumes:
       - /dev/bus/usb:/dev/bus/usb
       - /dev/i2c-7:/dev/i2c-7
