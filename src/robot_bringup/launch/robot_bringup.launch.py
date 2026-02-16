@@ -102,6 +102,11 @@ def generate_launch_description():
         description='Enable IMU fusion for Visual SLAM'
     )
 
+    camera_fps_arg = DeclareLaunchArgument(
+        'camera_fps', default_value='90',
+        description='Camera frame rate (fps) for all streams (infrared, depth, color)'
+    )
+
     net_w_arg = DeclareLaunchArgument(
         'net_w', default_value='640',
         description='YOLO network input width'
@@ -160,6 +165,7 @@ def generate_launch_description():
     num_classes = LaunchConfiguration('num_classes')
     align_depth_enable = LaunchConfiguration('align_depth_enable')
     enable_imu = LaunchConfiguration('enable_imu')
+    camera_fps = LaunchConfiguration('camera_fps')
     
     # 1. RealSense camera
     realsense_launch = IncludeLaunchDescription(
@@ -182,11 +188,11 @@ def generate_launch_description():
             'enable_infra2_rectification': 'false',
 
             # Infra profiles (width,height,fps) and enable auto exposure persistently
-            'infra1.profile': '640,480,30',
-            'infra2.profile': '640,480,30',
+            'infra1.profile': ['640,480,', camera_fps],
+            'infra2.profile': ['640,480,', camera_fps],
             
             # CRITICAL: Force depth resolution to match infra for nvblox
-            'depth_module.profile': '640,480,30',
+            'depth_module.profile': ['640,480,', camera_fps],
             'depth_module.enable_auto_exposure': 'true',
             'depth_module.emitter_enabled': '0',
             'enable_infra_emitter': 'false',
@@ -199,7 +205,7 @@ def generate_launch_description():
             'depth_module.global_time_enabled': 'true',
 
             'rgb_camera.profile': [
-                cam_w, TextSubstitution(text=','), cam_h, TextSubstitution(text=',30')
+                cam_w, TextSubstitution(text=','), cam_h, TextSubstitution(text=','), camera_fps
             ],
 
             'enable_gyro': enable_imu,
@@ -531,6 +537,7 @@ def generate_launch_description():
         enable_depth_arg,
         align_depth_arg,
         enable_imu_arg,
+        camera_fps_arg,
         net_w_arg,
         net_h_arg,
         model_file_arg,

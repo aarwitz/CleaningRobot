@@ -6,12 +6,19 @@ services:
     image: vision_production:1.0
     runtime: nvidia
     privileged: true
+    network_mode: host
+    ipc: host
     restart: always
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
     ports:
       - "8765:8765"  # legacy websocket (unused by default)
       - "8080:8080"  # web viewer
       - "9090:9090"  # rosbridge websocket (exposed to host)
     environment:
+      DISPLAY: $DISPLAY
       CAM_W: "640"
       CAM_H: "480"
       NET_W: "640"
@@ -29,6 +36,7 @@ services:
       ENABLE_COLOR: "true"
       ENABLE_ARM: "false"
       ENABLE_IMU: "true"
+      CAMERA_FPS: "90"
       ENABLE_BEHAVIOR: "false"
       ENABLE_NAV2: "false"
       ENABLE_NVBLOX: "true"
@@ -45,6 +53,8 @@ services:
       - ../src:/opt/vision_ws/src
       - ../tests:/opt/vision_ws/tests
       - slam_data:/tmp/cuvslam
+      - /dev:/dev
+      - /tmp/.X11-unix:/tmp/.X11-unix
     devices:
       - /dev/bus/usb
       - /dev/i2c-7

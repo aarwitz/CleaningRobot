@@ -12,9 +12,9 @@ ADDR = 0x34
 LOOP_HZ = 5    # Slow and steady (200ms ticks) to prevent firmware saturation
 DT = 1.0 / LOOP_HZ
 
-CMD_MAX = 85
-MIN_CMD = 60
-MAX_STEP = 5  # Allowing slightly larger steps since HZ is lower
+CMD_MAX = 100
+MIN_CMD = 40
+MAX_STEP = 20  # Allowing slightly larger steps since HZ is lower
 
 bus = smbus.SMBus(BUS_ID)
 
@@ -80,29 +80,15 @@ def run_smooth_cycle(target_peak):
         target = target_peak * math.sin(phase)
         if abs(target) < MIN_CMD: target = 0
             
-        # B. Apply MIN_CMD deadband and rate-limit while ensuring no non-zero
-        # commands below MIN_CMD are ever sent.
-        if abs(target) < MIN_CMD:
-            effective_target = 0
-        else:
-            effective_target = target
-
-        # If we're currently stopped and need to start, engage at MIN_CMD
-        # immediately (to avoid stepping through forbidden small non-zero values).
-        if current_l == 0 and effective_target != 0:
-            sign = 1 if effective_target > 0 else -1
-            current_l = sign * MIN_CMD
-            current_r = sign * MIN_CMD
-        else:
-            diff = effective_target - current_l
-            step = max(-MAX_STEP, min(MAX_STEP, diff))
-            current_l += step
-            current_r += step
+        # B. Rate Limit
+        diff = target - current_l
+        step = max(-MAX_STEP, min(MAX_STEP, diff))
+        current_l += step
+        current_r += step
 
         # C. THE TRANSACTION WINDOW (Write -> Rest -> Read)
         # This mimics the 'Old' script's 10ms-20ms gap strategy
         write_success = set_motors(current_l, current_r)
-        print(f"Motor command sent: L={current_l} R={current_r} | Write success: {write_success}")
         
         # Give it a tiny bit more breath before the read
         time.sleep(0.02) 
@@ -134,16 +120,10 @@ try:
     bus.write_byte_data(ADDR, 0x15, 0)
     time.sleep(1.0) # Massive pause to let the driver settle
 
-    tmp_cmd = 0
-    for i in range(0,100):
-        time.sleep(0.1)
-        set_motors(tmp_cmd, tmp_cmd)
-        tmp_cmd+=1
-
-    # run_smooth_cycle(CMD_MAX)
-    # print("\n--- Transitioning ---")
-    # time.sleep(2.0)
-    # run_smooth_cycle(-CMD_MAX)
+    run_smooth_cycle(CMD_MAX)
+    print("\n--- Transitioning ---")
+    time.sleep(2.0)
+    run_smooth_cycle(-CMD_MAX)
 
 finally:
     print("\nShutting down.")
