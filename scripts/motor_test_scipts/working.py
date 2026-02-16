@@ -3,7 +3,6 @@ import smbus
 import time
 import struct
 import math
-import random
 
 # ============================================================
 # CONFIG
