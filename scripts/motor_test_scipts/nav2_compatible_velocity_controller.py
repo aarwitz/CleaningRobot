@@ -25,7 +25,7 @@ I_CLAMP = 15.0
 
 VEL_ALPHA = 0.3
 
-HZ = 20.0
+HZ = 1.0
 DT = 1.0 / HZ
 
 LOG_INTERVAL = 0.2
@@ -39,29 +39,70 @@ MAX_TICKS_PER_SEC = 40000
 
 bus = smbus.SMBus(BUS_ID)
 
-def i2c_retry(func, *args, retries=5, delay=0.01):
+# Last-good encoder values and I2C error counter so transient I2C failures
+# don't crash the controller and we can monitor error frequency.
+_last_good_encoders = (0, 0, 0, 0)
+_i2c_error_count = 0
+_consec_bad_counts = [0, 0, 0, 0]
+BAD_THRESHOLD_CONSEC = 3
+
+def i2c_retry(func, *args, retries=5, delay=0.5, backoff=1.5, **kwargs):
+    """Retry I2C operations with exponential backoff.
+
+    Raises the last exception if all retries fail.
+    """
     for i in range(retries):
         try:
-            return func(*args)
-        except OSError:
+            return func(*args, **kwargs)
+        except (OSError, IOError) as e:
             if i == retries - 1:
                 raise
-            time.sleep(delay)
+            sleep_time = delay * (backoff ** i)
+            time.sleep(sleep_time)
 
 i2c_retry(bus.write_byte_data, ADDR, 0x14, 1)
 i2c_retry(bus.write_byte_data, ADDR, 0x15, 0)
 
 def read_encoders():
-    raw = i2c_retry(bus.read_i2c_block_data, ADDR, 0x3C, 16)
-    return struct.unpack('<iiii', bytes(raw))
+    """Read all 4 encoders with retries and fallback to last-good values.
+
+    On repeated I2C failures this will return the last-known-good encoder
+    tuple and increment an error counter so callers can continue running
+    while the issue is diagnosed.
+    """
+    global _last_good_encoders, _i2c_error_count
+    try:
+        raw = i2c_retry(bus.read_i2c_block_data, ADDR, 0x3C, 16, retries=8, delay=0.5)
+        enc = struct.unpack('<iiii', bytes(raw))
+        _last_good_encoders = enc
+        return enc
+    except Exception as e:
+        _i2c_error_count += 1
+        print(f"[WARN] read_encoders failed (count={_i2c_error_count}): {e}")
+        # small delay to avoid tight error loop
+        time.sleep(0.5)
+        return _last_good_encoders
+
 
 def set_motors(left, right):
-    i2c_retry(
-        bus.write_i2c_block_data,
-        ADDR,
-        0x33,
-        [right, right, left, left]
-    )
+    """Write motor command, but don't let transient I2C errors crash the program.
+
+    We log failures and increment the I2C error counter so the operator can
+    monitor health.
+    """
+    global _i2c_error_count
+    try:
+        i2c_retry(
+            bus.write_i2c_block_data,
+            ADDR,
+            0x33,
+            [right, right, left, left],
+            retries=6,
+            delay=0.5,
+        )
+    except Exception as e:
+        _i2c_error_count += 1
+        print(f"[WARN] set_motors I2C write failed (count={_i2c_error_count}): {e}")
 
 # ============================================================
 # Helpers
@@ -74,6 +115,20 @@ def clamp_cmd(u):
 
 def rate_limit(new, old):
     return max(old - MAX_STEP, min(old + MAX_STEP, new))
+
+
+def _delta_with_wrap(new, old):
+    """Compute 32-bit wrap-safe difference between encoder counts.
+
+    Handles signed or unsigned 32-bit counters by operating on the
+    32-bit unsigned representation and returning a signed delta.
+    """
+    new_u = new & 0xFFFFFFFF
+    old_u = old & 0xFFFFFFFF
+    diff = (new_u - old_u) & 0xFFFFFFFF
+    if diff & 0x80000000:
+        diff -= 0x100000000
+    return diff
 
 # ============================================================
 # PID
@@ -135,7 +190,7 @@ def drive_v_omega(v, omega, duration):
     state = State.RUNNING
 
     # reset baseline AFTER motor command
-    time.sleep(0.1)
+    time.sleep(0.5)
     enc_last = read_encoders()
     t_last = time.monotonic()
 
@@ -149,17 +204,33 @@ def drive_v_omega(v, omega, duration):
         if dt <= 0:
             continue
 
-        d = [enc[i] - enc_last[i] for i in range(4)]
-        enc_last = enc
-        t_last = t_now
-
-        # --- velocity sanity check ---
+        raw_d = [_delta_with_wrap(enc[i], enc_last[i]) for i in range(4)]
+        new_enc_last = list(enc_last)
+        d = [0, 0, 0, 0]
+        # --- velocity sanity check with per-motor consecutive bad detection ---
         for i in range(4):
-            ticks_per_sec = abs(d[i] / dt)
+            ticks_per_sec = abs(raw_d[i] / dt)
             if ticks_per_sec > MAX_TICKS_PER_SEC:
-                print(f"\nENCODER RATE FAULT motor={i} rate={ticks_per_sec:.0f} ticks/s")
-                state = State.STOPPING
-                break
+                _consec_bad_counts[i] += 1
+                if _consec_bad_counts[i] < BAD_THRESHOLD_CONSEC:
+                    print(f"[WARN] transient large encoder delta motor={i} rate={ticks_per_sec:.0f} ticks/s (count={_consec_bad_counts[i]})")
+                    print(f"[DEBUG] enc={enc} enc_last={enc_last} raw_d={raw_d[i]} dt={dt:.6f} i2c_err={_i2c_error_count}")
+                    # ignore this sample for the motor (keep old enc_last)
+                    d[i] = 0
+                    continue
+                else:
+                    print(f"\nENCODER RATE FAULT motor={i} rate={ticks_per_sec:.0f} ticks/s (count={_consec_bad_counts[i]})")
+                    print(f"[DEBUG] enc={enc} enc_last={enc_last} raw_d={raw_d[i]} dt={dt:.6f} i2c_err={_i2c_error_count}")
+                    state = State.STOPPING
+                    break
+            else:
+                # good reading, accept it
+                _consec_bad_counts[i] = 0
+                d[i] = raw_d[i]
+                new_enc_last[i] = enc[i]
+
+        enc_last = tuple(new_enc_last)
+        t_last = t_now
 
         if state == State.STOPPING:
             break
@@ -205,7 +276,7 @@ def drive_v_omega(v, omega, duration):
         uL_prev *= 0.6
         uR_prev *= 0.6
         set_motors(clamp_cmd(uL_prev), clamp_cmd(uR_prev))
-        time.sleep(0.05)
+        time.sleep(0.5)
 
     set_motors(0, 0)
 

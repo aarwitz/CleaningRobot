@@ -1,5 +1,7 @@
 # Motor Control Scripts
 
+Run scripts with python3.8+
+
 Quick notes on what these scripts are for:
 
 **nav2_compatible_velocity_controller.py** - The main one I'm actively working on. Takes Nav2's (v, omega) outputs and converts them to differential drive (v_left, v_right) in the [-100, 100] range that the motor driver expects.
@@ -11,3 +13,6 @@ Quick notes on what these scripts are for:
 **PID_control.py** - PID-based velocity control attempt. does not work, i forget what i was doing.
 
 **all_forward_then_backward.py** - Simple test script to verify basic motor movement. very similar to test_2.py
+
+Debugging:
+- 

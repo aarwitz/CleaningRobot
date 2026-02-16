@@ -31,13 +31,14 @@ COPY src /opt/vision_ws/src
 RUN . /opt/ros/humble/setup.sh && \
     colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# Copy models, viewer, and entrypoint
+# Copy models, viewers, and entrypoint
 COPY models /models
-COPY viewer.html /opt/vision_ws/viewer.html
+COPY slam_viewer.html /opt/vision_ws/slam_viewer.html
+COPY nvblox_viewer.html /opt/vision_ws/nvblox_viewer.html
 COPY scripts/entrypoint.sh /opt/vision_ws/entrypoint.sh
 RUN chmod +x /opt/vision_ws/entrypoint.sh
 
-ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ENV ROS_DOMAIN_ID=0
 
 ENTRYPOINT ["/opt/vision_ws/entrypoint.sh"]

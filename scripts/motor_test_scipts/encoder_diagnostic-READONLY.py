@@ -28,7 +28,7 @@ MAX_REASONABLE_DELTA = 10000
 
 bus = smbus.SMBus(BUS_ID)
 
-def i2c_retry(func, *args, retries=5, delay=0.01):
+def i2c_retry(func, args=(), retries=5, delay=0.01):
     for i in range(retries):
         try:
             return func(*args)
@@ -38,11 +38,12 @@ def i2c_retry(func, *args, retries=5, delay=0.01):
             time.sleep(delay)
 
 # Init driver (same as your other scripts)
-i2c_retry(bus.write_byte_data, ADDR, 0x14, 1)
-i2c_retry(bus.write_byte_data, ADDR, 0x15, 0)
+i2c_retry(func=bus.write_byte_data, args=(ADDR, 0x14, 1))
+i2c_retry(func=bus.write_byte_data, args=(ADDR, 0x15, 0))
 
 def read_encoders():
-    raw = i2c_retry(bus.read_i2c_block_data, ADDR, 0x3C, 16)
+    raw = i2c_retry(func=bus.read_i2c_block_data, 
+                    args=(ADDR, 0x3C, 16))
     return struct.unpack('<iiii', bytes(raw))
 
 print("\n=== Encoder Diagnostic Test (READ ONLY) ===")

@@ -65,6 +65,11 @@ def generate_launch_description():
         description='Enable rosbridge for web-based visualization'
     )
     
+    enable_nvblox_arg = DeclareLaunchArgument(
+        'enable_nvblox', default_value='false',
+        description='Enable nvblox 3D reconstruction'
+    )
+    
     cam_w_arg = DeclareLaunchArgument(
         'cam_w', default_value='640',
         description='Camera width'
@@ -140,6 +145,7 @@ def generate_launch_description():
     enable_nav2 = LaunchConfiguration('enable_nav2')
     enable_arm = LaunchConfiguration('enable_arm')
     enable_visualization = LaunchConfiguration('enable_visualization')
+    enable_nvblox = LaunchConfiguration('enable_nvblox')
     cam_w = LaunchConfiguration('cam_w')
     cam_h = LaunchConfiguration('cam_h')
     # depth_profile removed; use literal profile string below
@@ -178,10 +184,16 @@ def generate_launch_description():
             # Infra profiles (width,height,fps) and enable auto exposure persistently
             'infra1.profile': '640,480,30',
             'infra2.profile': '640,480,30',
+            
+            # CRITICAL: Force depth resolution to match infra for nvblox
+            'depth_module.profile': '640,480,30',
             'depth_module.enable_auto_exposure': 'true',
             'depth_module.emitter_enabled': '0',
             'enable_infra_emitter': 'false',
             'emitter_enabled': '0',
+            
+            # Enable depth-to-color alignment for nvblox
+            'align_depth.enable': align_depth_enable,
 
             'enable_sync': 'true',
             'depth_module.global_time_enabled': 'true',
@@ -208,7 +220,7 @@ def generate_launch_description():
         parameters=[{
             'enable_image_denoising': False,
             'rectified_images': False,
-            'enable_imu_fusion': True,
+            'enable_imu_fusion': enable_imu,
             'gyro_noise_density': 0.000244,
             'gyro_random_walk': 0.000019393,
             'accel_noise_density': 0.001862,
@@ -248,6 +260,49 @@ def generate_launch_description():
         composable_node_descriptions=[visual_slam_node],
         output='screen',
         condition=IfCondition(enable_slam)
+    )
+    
+    # 2b. Nvblox 3D reconstruction - builds volumetric map from depth + SLAM odometry
+    nvblox_node = ComposableNode(
+        name='nvblox_node',
+        package='nvblox_ros',
+        plugin='nvblox::NvbloxNode',
+        parameters=[{
+            'global_frame': 'map',
+            'voxel_size': 0.05,  # 5cm voxels
+            'esdf': True,  # Enable ESDF for navigation
+            'esdf_2d': True,  # Enable 2D slice for Nav2 costmap
+            'esdf_2d_min_height': 0.0,
+            'esdf_2d_max_height': 2.0,
+            'distance_slice': True,
+            'mesh': True,  # Enable mesh output for visualization
+            'max_tsdf_update_hz': 10.0,
+            'max_color_update_hz': 5.0,
+            'max_mesh_update_hz': 5.0,
+            'max_esdf_update_hz': 2.0,
+            'tsdf_integrator_max_integration_distance_m': 10.0,
+            'mesh_integrator_min_weight': 1e-4,
+            'mesh_integrator_weld_vertices': True,
+        }],
+        remappings=[
+            ('depth/image', '/camera/aligned_depth_to_color/image_raw'),
+            ('depth/camera_info', '/camera/aligned_depth_to_color/camera_info'),
+            ('color/image', '/camera/color/image_raw'),
+            ('color/camera_info', '/camera/color/camera_info'),
+            ('pose', '/visual_slam/tracking/vo_pose'),
+            ('pointcloud', '/nvblox/pointcloud'),
+        ],
+        condition=IfCondition(enable_nvblox)
+    )
+    
+    nvblox_container = ComposableNodeContainer(
+        name='nvblox_container',
+        namespace='',
+        package='rclcpp_components',
+        executable='component_container',
+        composable_node_descriptions=[nvblox_node],
+        output='screen',
+        condition=IfCondition(enable_nvblox)
     )
     
     # 3. YOLOv8 detection - composable node container
@@ -469,6 +524,7 @@ def generate_launch_description():
         enable_nav2_arg,
         enable_arm_arg,
         enable_visualization_arg,
+        enable_nvblox_arg,
         cam_w_arg,
         cam_h_arg,
         enable_color_arg,
@@ -501,6 +557,7 @@ def generate_launch_description():
             ]
         ),
         visual_slam_container,
+        nvblox_container,
         vision_container,
         yolo_encoder_launch,
         clothes_perception_node,

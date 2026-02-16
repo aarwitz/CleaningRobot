@@ -18,11 +18,20 @@ The `entrypoint.sh` script runs:
 ros2 launch robot_bringup robot_bringup.launch.py
 ```
 
+## Visualization
+
+**To visualize SLAM and nvblox locally via the container's web viewers:**
+- **Quick Start:** See **[FINAL_SETUP_INSTRUCTIONS.md](FINAL_SETUP_INSTRUCTIONS.md)** ← **Start here!**
+- Configuration summary: [SETUP_SUMMARY.md](SETUP_SUMMARY.md)
+
+The system uses local web-based visualization. Start the container and open the viewers served by it at `http://localhost:8080/slam_viewer.html` and `http://localhost:8080/nvblox_viewer.html`. Cross-machine DDS-based visualization has been removed.
+
 ## What's Running
 
 The unified launch file starts:
 - **RealSense D455** camera (with aligned depth enabled)
 - **Visual SLAM** (stereo odometry from infrared cameras)
+- **Nvblox** (optional, 3D volumetric reconstruction from RGBD + SLAM odometry)
 - **YOLOv8** detection (composable nodes in GPU-optimized container)
 - **clothes perception** node (3D target extraction with temporal filtering)
 - **Behavior manager** (state machine orchestrating the mission)
@@ -46,7 +55,17 @@ ENABLE_SLAM: "true"           # Visual SLAM odometry
 ENABLE_YOLO: "true"           # YOLOv8 detection
 ENABLE_BEHAVIOR: "true"       # State machine
 ENABLE_NAV2: "false"          # Navigation stack (disabled by default)
+ENABLE_NVBLOX: "false"        # 3D volumetric reconstruction (requires depth+color enabled)
 ENABLE_VISUALIZATION: "true"  # Web-based SLAM viewer
+```
+
+Note: Cross-machine DDS configurations (CycloneDDS/FastDDS unicast setups) have been removed. Use the container's rosbridge server (WebSocket on port `9090`) and HTTP viewer (port `8080`) for local visualization.
+
+**Note:** Nvblox requires depth and color streams enabled. If enabling nvblox, also set:
+```yaml
+ENABLE_DEPTH: "true"
+ENABLE_COLOR: "true"
+ALIGN_DEPTH: "true"
 ```
 
 The system automatically starts:
@@ -73,17 +92,29 @@ ros2 topic echo /clothes/target_point_map
 
 **Web Visualization (Recommended):**
 
-Open a browser and navigate to:
+**SLAM Viewer** - Shows visual odometry, path, and landmarks:
 ```
-http://<device-ip>:8080/viewer.html
+http://localhost:8080/slam_viewer.html
 ```
 
-The web viewer shows:
+**Nvblox Viewer** - Shows 3D volumetric reconstruction (if nvblox enabled):
+```
+http://localhost:8080/nvblox_viewer.html
+```
+
+The SLAM viewer shows:
 - Real-time SLAM path (green line)
 - Landmarks/features (orange points)
 - Robot pose (green cone)
 - Live statistics (state, odometry rate, path length)
 - Interactive 3D view (drag to pan, scroll to zoom)
+
+The Nvblox viewer shows:
+- Real-time 3D mesh reconstruction
+- Volumetric map built from depth camera
+- Robot pose in reconstructed environment
+- Mesh rendering modes (smooth, flat, wireframe, normals)
+- Map statistics (triangles, volume, update rate)
 
 **Command-line checks:**
 

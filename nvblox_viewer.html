@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nvblox 3D Reconstruction Viewer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            overflow: hidden;
+        }
+        
+        #header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px 20px;
+            z-index: 1000;
+            border-bottom: 2px solid #00ccff;
+        }
+        
+        h1 {
+            margin: 0;
+            font-size: 24px;
+            color: #00ccff;
+        }
+        
+        #status {
+            margin-top: 5px;
+            font-size: 14px;
+            color: #aaa;
+        }
+        
+        .connected { color: #00ccff; }
+        .disconnected { color: #ff4444; }
+        
+        #controls {
+            position: fixed;
+            top: 90px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 999;
+            min-width: 250px;
+        }
+        
+        .control-group {
+            margin-bottom: 15px;
+        }
+        
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 12px;
+            color: #aaa;
+        }
+        
+        .control-group input[type="checkbox"] {
+            margin-right: 8px;
+        }
+        
+        .control-group select {
+            width: 100%;
+            padding: 5px;
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 4px;
+        }
+        
+        .stat {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+        
+        .stat-label { color: #aaa; }
+        .stat-value { color: #00ccff; font-weight: bold; }
+        
+        #container {
+            position: fixed;
+            top: 90px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+        }
+        
+        button {
+            background: #00ccff;
+            color: #000;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-right: 10px;
+            margin-bottom: 5px;
+        }
+        
+        button:hover {
+            background: #00aadd;
+        }
+        
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+        
+        .info-text {
+            font-size: 11px;
+            color: #888;
+            margin-top: 5px;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h1>🗺️ Nvblox 3D Reconstruction</h1>
+        <div id="status" class="disconnected">Connecting to rosbridge...</div>
+    </div>
+    
+    <div id="controls">
+        <div class="control-group">
+            <strong>Statistics</strong>
+            <div class="stat">
+                <span class="stat-label">Mesh Triangles:</span>
+                <span class="stat-value" id="mesh-triangles">--</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Mesh Update Rate:</span>
+                <span class="stat-value" id="mesh-rate">-- Hz</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Map Volume:</span>
+                <span class="stat-value" id="map-volume">-- m³</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Robot Position:</span>
+                <span class="stat-value" id="robot-pos">--</span>
+            </div>
+        </div>
+        
+        <div class="control-group">
+            <strong>Mesh Rendering</strong>
+            <label>
+                <select id="mesh-material">
+                    <option value="phong">Phong (Smooth)</option>
+                    <option value="basic">Basic (Flat)</option>
+                    <option value="wireframe">Wireframe</option>
+                    <option value="normal">Normal Debug</option>
+                </select>
+            </label>
+        </div>
+        
+        <div class="control-group">
+            <strong>Display Options</strong>
+            <label><input type="checkbox" id="show-mesh" checked> 3D Mesh</label>
+            <label><input type="checkbox" id="show-robot" checked> Robot Pose</label>
+            <label><input type="checkbox" id="show-grid" checked> Grid</label>
+            <label><input type="checkbox" id="show-axes" checked> Coordinate Axes</label>
+            <label><input type="checkbox" id="auto-follow"> Auto-Follow Robot</label>
+            <p class="info-text">Nvblox publishes mesh blocks incrementally. Initial build takes 10-30s.</p>
+        </div>
+        
+        <div class="control-group">
+            <button id="reset-view">Reset View</button>
+            <button id="clear-mesh">Clear Mesh</button>
+        </div>
+    </div>
+    
+    <div id="container"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+    <script>
+        // Simple OrbitControls fallback if CDN fails
+        if (typeof THREE.OrbitControls === 'undefined') {
+            THREE.OrbitControls = function(camera, domElement) {
+                this.camera = camera;
+                this.domElement = domElement;
+                this.target = new THREE.Vector3();
+                this.enableDamping = true;
+                this.dampingFactor = 0.05;
+                
+                let isMouseDown = false;
+                let mouseButton = 0;
+                const rotateSpeed = 0.005;
+                const panSpeed = 0.01;
+                const zoomSpeed = 0.1;
+                
+                const spherical = { radius: 10, theta: 0, phi: Math.PI / 4 };
+                
+                const updateCamera = () => {
+                    const pos = new THREE.Vector3();
+                    pos.x = spherical.radius * Math.sin(spherical.phi) * Math.sin(spherical.theta);
+                    pos.y = spherical.radius * Math.cos(spherical.phi);
+                    pos.z = spherical.radius * Math.sin(spherical.phi) * Math.cos(spherical.theta);
+                    this.camera.position.copy(this.target).add(pos);
+                    this.camera.lookAt(this.target);
+                };
+                
+                domElement.addEventListener('mousedown', (e) => {
+                    isMouseDown = true;
+                    mouseButton = e.button;
+                    this.lastX = e.clientX;
+                    this.lastY = e.clientY;
+                });
+                
+                domElement.addEventListener('mousemove', (e) => {
+                    if (!isMouseDown) return;
+                    const dx = e.clientX - this.lastX;
+                    const dy = e.clientY - this.lastY;
+                    
+                    if (mouseButton === 0) {
+                        spherical.theta += dx * rotateSpeed;
+                        spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi + dy * rotateSpeed));
+                    } else if (mouseButton === 2) {
+                        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+                        const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
+                        this.target.add(right.multiplyScalar(-dx * panSpeed));
+                        this.target.add(up.multiplyScalar(dy * panSpeed));
+                    }
+                    
+                    this.lastX = e.clientX;
+                    this.lastY = e.clientY;
+                    updateCamera();
+                });
+                
+                domElement.addEventListener('mouseup', () => { isMouseDown = false; });
+                domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+                
+                domElement.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    spherical.radius = Math.max(1, Math.min(100, spherical.radius + e.deltaY * zoomSpeed * 0.01));
+                    updateCamera();
+                });
+                
+                this.update = () => {};
+                
+                const offset = this.camera.position.clone().sub(this.target);
+                spherical.radius = offset.length();
+                spherical.theta = Math.atan2(offset.x, offset.z);
+                spherical.phi = Math.acos(Math.max(-1, Math.min(1, offset.y / spherical.radius)));
+            };
+        }
+        
+        // ROS connection
+        const ros = new ROSLIB.Ros({
+            url: `ws://${window.location.hostname}:9090`
+        });
+        
+        const statusEl = document.getElementById('status');
+        
+        ros.on('connection', () => {
+            statusEl.textContent = 'Connected to rosbridge';
+            statusEl.className = 'connected';
+        });
+        
+        ros.on('error', (error) => {
+            statusEl.textContent = 'Error: ' + error;
+            statusEl.className = 'disconnected';
+        });
+        
+        ros.on('close', () => {
+            statusEl.textContent = 'Disconnected';
+            statusEl.className = 'disconnected';
+        });
+        
+        // Three.js setup
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a1a);
+        
+        const camera = new THREE.PerspectiveCamera(
+            75,
+            window.innerWidth / (window.innerHeight - 90),
+            0.1,
+            1000
+        );
+        camera.position.set(5, 5, 10);
+        camera.lookAt(0, 0, 0);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight - 90);
+        document.getElementById('container').appendChild(renderer.domElement);
+        
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.screenSpacePanning = false;
+        controls.minDistance = 1;
+        controls.maxDistance = 100;
+        controls.maxPolarAngle = Math.PI;
+        
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404040, 2);
+        scene.add(ambientLight);
+        
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+        directionalLight.position.set(5, 10, 7.5);
+        scene.add(directionalLight);
+        
+        const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.5);
+        directionalLight2.position.set(-5, 5, -5);
+        scene.add(directionalLight2);
+        
+        // Grid
+        const gridHelper = new THREE.GridHelper(20, 20, 0x00ccff, 0x444444);
+        scene.add(gridHelper);
+        
+        // Coordinate axes
+        const axesHelper = new THREE.AxesHelper(2);
+        scene.add(axesHelper);
+        
+        // Nvblox mesh
+        let meshGeometry = new THREE.BufferGeometry();
+        let meshMaterial = new THREE.MeshPhongMaterial({ 
+            color: 0x00ccff,
+            flatShading: false,
+            side: THREE.DoubleSide
+        });
+        const meshObject = new THREE.Mesh(meshGeometry, meshMaterial);
+        scene.add(meshObject);
+        
+        // Robot marker
+        const robotGeometry = new THREE.ConeGeometry(0.3, 0.6, 8);
+        const robotMaterial = new THREE.MeshPhongMaterial({ color: 0xff6600 });
+        const robot = new THREE.Mesh(robotGeometry, robotMaterial);
+        robot.rotation.x = Math.PI / 2;
+        scene.add(robot);
+        
+        // State
+        let autoFollow = false;
+        let lastRobotPos = new THREE.Vector3();
+        let meshUpdateCount = 0;
+        let lastMeshUpdateTime = Date.now();
+        let totalVolume = 0;
+        
+        // Subscribe to nvblox mesh topic
+        const meshSub = new ROSLIB.Topic({
+            ros: ros,
+            name: '/nvblox_node/mesh',
+            messageType: 'nvblox_msgs/msg/Mesh'
+        });
+        
+        meshSub.subscribe((message) => {
+            // Nvblox publishes mesh as blocks with vertices and triangles
+            // message.block has: vertices (Point[]), triangles (TriangleIndex[])
+            // Each TriangleIndex has x, y, z uint32 indices
+            
+            const vertices = [];
+            const indices = [];
+            let triangleCount = 0;
+            
+            // Process each mesh block
+            message.block.forEach(block => {
+                const baseIndex = vertices.length / 3;
+                
+                // Add vertices
+                block.vertices.forEach(v => {
+                    vertices.push(v.x, v.y, v.z);
+                });
+                
+                // Add triangle indices
+                block.triangles.forEach(tri => {
+                    indices.push(
+                        baseIndex + tri.x,
+                        baseIndex + tri.y,
+                        baseIndex + tri.z
+                    );
+                    triangleCount++;
+                });
+            });
+            
+            // Update geometry
+            if (vertices.length > 0) {
+                meshGeometry.dispose();
+                meshGeometry = new THREE.BufferGeometry();
+                meshGeometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                meshGeometry.setIndex(indices);
+                meshGeometry.computeVertexNormals();
+                
+                meshObject.geometry = meshGeometry;
+                
+                // Update statistics
+                document.getElementById('mesh-triangles').textContent = triangleCount.toLocaleString();
+                
+                // Estimate volume (rough approximation based on vertex count)
+                totalVolume = (vertices.length / 3) * 0.05 * 0.05 * 0.05; // voxel_size^3
+                document.getElementById('map-volume').textContent = totalVolume.toFixed(2);
+                
+                // Update rate
+                meshUpdateCount++;
+                const now = Date.now();
+                if (now - lastMeshUpdateTime > 1000) {
+                    document.getElementById('mesh-rate').textContent = meshUpdateCount.toFixed(1);
+                    meshUpdateCount = 0;
+                    lastMeshUpdateTime = now;
+                }
+            }
+        });
+        
+        // Subscribe to robot odometry for pose
+        const odomSub = new ROSLIB.Topic({
+            ros: ros,
+            name: '/visual_slam/tracking/odometry',
+            messageType: 'nav_msgs/msg/Odometry'
+        });
+        
+        odomSub.subscribe((message) => {
+            const pos = message.pose.pose.position;
+            const quat = message.pose.pose.orientation;
+            
+            robot.position.set(pos.x, pos.z, -pos.y);
+            robot.quaternion.set(quat.x, quat.z, -quat.y, quat.w);
+            
+            lastRobotPos.set(pos.x, pos.z, -pos.y);
+            
+            document.getElementById('robot-pos').textContent = 
+                `${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}`;
+            
+            if (autoFollow) {
+                controls.target.copy(lastRobotPos);
+                const offset = new THREE.Vector3(5, 5, 10);
+                camera.position.copy(lastRobotPos).add(offset);
+            }
+        });
+        
+        // Material selection
+        document.getElementById('mesh-material').addEventListener('change', (e) => {
+            const value = e.target.value;
+            meshMaterial.dispose();
+            
+            if (value === 'phong') {
+                meshMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0x00ccff, 
+                    flatShading: false,
+                    side: THREE.DoubleSide
+                });
+            } else if (value === 'basic') {
+                meshMaterial = new THREE.MeshBasicMaterial({ 
+                    color: 0x00ccff, 
+                    side: THREE.DoubleSide
+                });
+            } else if (value === 'wireframe') {
+                meshMaterial = new THREE.MeshBasicMaterial({ 
+                    color: 0x00ccff, 
+                    wireframe: true
+                });
+            } else if (value === 'normal') {
+                meshMaterial = new THREE.MeshNormalMaterial({ side: THREE.DoubleSide });
+            }
+            
+            meshObject.material = meshMaterial;
+        });
+        
+        // Display controls
+        document.getElementById('show-mesh').addEventListener('change', (e) => {
+            meshObject.visible = e.target.checked;
+        });
+        
+        document.getElementById('show-robot').addEventListener('change', (e) => {
+            robot.visible = e.target.checked;
+        });
+        
+        document.getElementById('show-grid').addEventListener('change', (e) => {
+            gridHelper.visible = e.target.checked;
+        });
+        
+        document.getElementById('show-axes').addEventListener('change', (e) => {
+            axesHelper.visible = e.target.checked;
+        });
+        
+        document.getElementById('auto-follow').addEventListener('change', (e) => {
+            autoFollow = e.target.checked;
+        });
+        
+        document.getElementById('reset-view').addEventListener('click', () => {
+            camera.position.set(5, 5, 10);
+            controls.target.set(0, 0, 0);
+            controls.update();
+        });
+        
+        document.getElementById('clear-mesh').addEventListener('click', () => {
+            meshGeometry.dispose();
+            meshGeometry = new THREE.BufferGeometry();
+            meshObject.geometry = meshGeometry;
+            document.getElementById('mesh-triangles').textContent = '--';
+            document.getElementById('map-volume').textContent = '-- m³';
+        });
+        
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+        
+        // Handle resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / (window.innerHeight - 90);
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight - 90);
+        });
+    </script>
+</body>
+</html>
