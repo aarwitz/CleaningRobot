@@ -51,7 +51,7 @@ def generate_launch_description():
     )
     
     enable_nav2_arg = DeclareLaunchArgument(
-        'enable_nav2', default_value='false',
+        'enable_nav2', default_value='true',
         description='Enable Nav2 navigation stack'
     )
 
@@ -66,7 +66,7 @@ def generate_launch_description():
     )
     
     enable_nvblox_arg = DeclareLaunchArgument(
-        'enable_nvblox', default_value='false',
+        'enable_nvblox', default_value='true',
         description='Enable nvblox 3D reconstruction'
     )
     
@@ -83,12 +83,12 @@ def generate_launch_description():
     # depth_profile removed; using fixed profile string to avoid missing launch config
 
     enable_color_arg = DeclareLaunchArgument(
-        'enable_color', default_value='false',
+        'enable_color', default_value='true',
         description='Enable RGB/color stream on RealSense'
     )
 
     enable_depth_arg = DeclareLaunchArgument(
-        'enable_depth', default_value='false',
+        'enable_depth', default_value='true',
         description='Enable depth stream on RealSense'
     )
     
@@ -204,9 +204,10 @@ def generate_launch_description():
             'enable_sync': 'true',
             'depth_module.global_time_enabled': 'true',
 
-            'rgb_camera.profile': [
-                cam_w, TextSubstitution(text=','), cam_h, TextSubstitution(text=','), camera_fps
-            ],
+            # I think default color profile is fine for now
+            # 'rgb_camera.profile': [
+            #     cam_w, TextSubstitution(text=','), cam_h, TextSubstitution(text=','), camera_fps
+            # ],
 
             'enable_gyro': enable_imu,
             'enable_accel': enable_imu,

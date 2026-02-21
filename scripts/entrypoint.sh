@@ -66,7 +66,7 @@ exec ros2 launch robot_bringup robot_bringup.launch.py \
     enable_slam:="${ENABLE_SLAM:-true}" \
     enable_yolo:="${ENABLE_YOLO:-true}" \
     enable_behavior:="${ENABLE_BEHAVIOR:-true}" \
-    enable_nav2:="${ENABLE_NAV2:-false}" \
+    enable_nav2:="${ENABLE_NAV2:-true}" \
     cam_w:="${CAM_W:-640}" \
     cam_h:="${CAM_H:-480}" \
     net_w:="${NET_W:-640}" \
@@ -82,6 +82,6 @@ exec ros2 launch robot_bringup robot_bringup.launch.py \
     enable_arm:="${ENABLE_ARM:-true}" \
     enable_imu:="${ENABLE_IMU:-True}" \
     camera_fps:="${CAMERA_FPS:-90}" \
-    enable_nvblox:="${ENABLE_NVBLOX:-false}" \
+    enable_nvblox:="${ENABLE_NVBLOX:-true}" \
     enable_visualization:="${ENABLE_VISUALIZATION:-true}"
     
