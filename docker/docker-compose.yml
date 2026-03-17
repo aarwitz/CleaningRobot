@@ -18,7 +18,9 @@ services:
       - "8080:8080"  # web viewer
       - "9090:9090"  # rosbridge websocket (exposed to host)
     environment:
-      DISPLAY: $DISPLAY
+      
+      
+      
       CAM_W: "640"
       CAM_H: "480"
       NET_W: "640"
@@ -54,8 +56,7 @@ services:
       - ../tests:/opt/vision_ws/tests
       - slam_data:/tmp/cuvslam
       - /dev:/dev
-      - /tmp/.X11-unix:/tmp/.X11-unix
-    devices:
+          devices:
       - /dev/bus/usb
       - /dev/i2c-7
 
