@@ -18,14 +18,12 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution, Command
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command, PythonExpression
 from launch_ros.actions import Node, ComposableNodeContainer
 from launch_ros.descriptions import ComposableNode, ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 import os
-from launch.conditions import IfCondition
-from launch.substitutions import PythonExpression
 
 def generate_launch_description():
     # Declare arguments
@@ -118,17 +116,22 @@ def generate_launch_description():
     )
     
     model_file_arg = DeclareLaunchArgument(
-        'model_file_path', default_value='/models/clothes2.onnx',
+        'model_file_path', default_value='/models/yolov8s.onnx',
         description='Path to YOLO ONNX model'
     )
     
     engine_file_arg = DeclareLaunchArgument(
-        'engine_file_path', default_value='/models/clothes2.plan',
+        'engine_file_path', default_value='/models/yolov8s.plan',
         description='Path to TensorRT engine file'
+    )
+
+    force_engine_update_arg = DeclareLaunchArgument(
+        'force_engine_update', default_value='true',
+        description='Force TensorRT engine rebuild from ONNX at startup'
     )
     
     conf_threshold_arg = DeclareLaunchArgument(
-        'confidence_threshold', default_value='0.65',
+        'confidence_threshold', default_value='0.15',
         description='YOLO confidence threshold'
     )
     
@@ -138,8 +141,8 @@ def generate_launch_description():
     )
     
     num_classes_arg = DeclareLaunchArgument(
-        'num_classes', default_value='1',
-        description='Number of YOLO classes'
+        'num_classes', default_value='80',
+        description='Number of YOLO classes (80 for COCO/yolov8s, 1 for custom single-class)'
     )
     
     # Get argument values
@@ -160,6 +163,7 @@ def generate_launch_description():
     net_h = LaunchConfiguration('net_h')
     model_file_path = LaunchConfiguration('model_file_path')
     engine_file_path = LaunchConfiguration('engine_file_path')
+    force_engine_update = LaunchConfiguration('force_engine_update')
     confidence_threshold = LaunchConfiguration('confidence_threshold')
     nms_threshold = LaunchConfiguration('nms_threshold')
     num_classes = LaunchConfiguration('num_classes')
@@ -204,10 +208,8 @@ def generate_launch_description():
             'enable_sync': 'true',
             'depth_module.global_time_enabled': 'true',
 
-            # I think default color profile is fine for now
-            # 'rgb_camera.profile': [
-            #     cam_w, TextSubstitution(text=','), cam_h, TextSubstitution(text=','), camera_fps
-            # ],
+            # Set explicit color profile to match infra/depth resolution
+            'rgb_camera.profile': ['640,480,', camera_fps],
 
             'enable_gyro': enable_imu,
             'enable_accel': enable_imu,
@@ -312,7 +314,7 @@ def generate_launch_description():
         condition=IfCondition(enable_nvblox)
     )
     
-    # 3. YOLOv8 detection - composable node container
+    # 3. YOLOv8 detection - Isaac ROS composable node container
     vision_container = ComposableNodeContainer(
         name='vision_container',
         namespace='',
@@ -445,7 +447,7 @@ def generate_launch_description():
         condition=IfCondition(enable_nav2)  # Only when Nav2 is enabled
     )
     
-    # 7. Arm bridge (Waveshare RoArm v2)
+    # 7. Arm bridge (Waveshare RoArm v2) – autonomous pick-and-place
     arm_bridge_node = Node(
         package='arm_bridge',
         executable='arm_bridge_node',
@@ -454,6 +456,12 @@ def generate_launch_description():
             'serial_port': '/dev/ttyUSB0',
             'baud_rate': 115200,
             'enable_arm': True,
+            'dry_run': False,
+            'stable_frames': 4,
+            'stable_max_drift_px': 40.0,
+            'cooldown_s': 5.0,
+            'min_depth_m': 0.15,
+            'max_depth_m': 0.60,
         }],
         output='screen',
         condition=IfCondition(enable_arm)
@@ -543,6 +551,7 @@ def generate_launch_description():
         net_h_arg,
         model_file_arg,
         engine_file_arg,
+        force_engine_update_arg,
         conf_threshold_arg,
         nms_threshold_arg,
         num_classes_arg,

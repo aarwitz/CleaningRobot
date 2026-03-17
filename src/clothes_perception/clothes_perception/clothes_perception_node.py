@@ -39,7 +39,7 @@ from vision_msgs.msg import Detection2DArray, Detection2D
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PointStamped
 from std_srvs.srv import SetBool, Trigger
-from behavior_manager_interfaces.srv import Get3DPose
+from behavior_manager_interfaces.srv import GetSock3D
 
 
 class ClothesPerceptionNode(Node):
@@ -98,7 +98,7 @@ class ClothesPerceptionNode(Node):
         
         # Services
         self.get_3d_srv = self.create_service(
-            Get3DPose,
+            GetSock3D,
             '/clothes_perception/get_3d_pose',
             self.get_clothes_3d_callback
         )
@@ -159,7 +159,7 @@ class ClothesPerceptionNode(Node):
         
         return u_img, v_img
     
-    def get_clothes_3d_callback(self, request: Get3DPose.Request, response: Get3DPose.Response):
+    def get_clothes_3d_callback(self, request: GetSock3D.Request, response: GetSock3D.Response):
         """On-demand 3D lookup - only called when entering PICK state"""
         if self.camera_info is None:
             response.success = False

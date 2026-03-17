@@ -174,9 +174,9 @@ try:
     print(f"Motor 3: {start3}")
     print(f"Motor 4: {start4}")
 
-    # Move forward 18000 ticks
-    print("\n--- Moving Forward 18000 ticks ---")
-    move_to_target(18000, kp=0.2, ki=0.0, kd=0.0, timeout=30.0)
+    # Move forward 8000 ticks
+    print("\n--- Moving Forward 8000 ticks ---")
+    move_to_target(8000, kp=0.2, ki=0.0, kd=0.0, timeout=30.0)
 
     time.sleep(1.0)
 
@@ -189,9 +189,9 @@ try:
     print(f"Motor 3: {mid3} (moved {mid3 - start3})")
     print(f"Motor 4: {mid4} (moved {mid4 - start4})")
 
-    # Move backward 18000 ticks (return to start)
-    print("\n--- Moving Backward 18000 ticks ---")
-    move_to_target(-18000, kp=0.2, ki=0.00, kd=0.0, timeout=30.0)
+    # Move backward 8000 ticks (return to start)
+    print("\n--- Moving Backward 8000 ticks ---")
+    move_to_target(-8000, kp=0.2, ki=0.00, kd=0.0, timeout=30.0)
 
     time.sleep(1.0)
 

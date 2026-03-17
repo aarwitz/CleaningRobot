@@ -35,7 +35,8 @@ echo "[entrypoint] - Behavior: ${ENABLE_BEHAVIOR:-true}"
 echo "[entrypoint] - Nav2: ${ENABLE_NAV2:-false}"
 echo "[entrypoint] - Camera: ${CAM_W:-640}x${CAM_H:-480}"
 echo "[entrypoint] - Network: ${NET_W:-640}x${NET_H:-640}"
-echo "[entrypoint] - Model: ${MODEL_FILE_PATH:-/models/clothes2.onnx}"
+echo "[entrypoint] - Model: ${MODEL_FILE_PATH:-/models/yolov8s.onnx}"
+echo "[entrypoint] - Force Engine Rebuild: ${FORCE_ENGINE_UPDATE:-true}"
 echo "[entrypoint] - Arm Bridge: ${ENABLE_ARM:-true}"
 echo "[entrypoint] - IMU Fusion: ${ENABLE_IMU:-True}"
 echo "[entrypoint] - Camera FPS: ${CAMERA_FPS:-90}"
@@ -47,10 +48,9 @@ echo "[entrypoint] =========================================="
 echo "[entrypoint] Launching robot system..."
 # Ensure the local workspace package is built so updated launch files are available
 if [ -d "/opt/vision_ws/src/robot_bringup" ]; then
-    echo "[entrypoint] Building robot_bringup package to pick up launch changes..."
+    echo "[entrypoint] Building bind-mounted packages to pick up source changes..."
     cd /opt/vision_ws || true
-    # build only the bringup package to keep startup fast
-    colcon build --packages-select robot_bringup --cmake-args -DCMAKE_BUILD_TYPE=Release || echo "[entrypoint] robot_bringup build failed (continuing)"
+    colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -5 || echo "[entrypoint] overlay build failed (continuing)"
     # re-source overlay after build
     if [ -f "/opt/vision_ws/install/setup.bash" ]; then
         source /opt/vision_ws/install/setup.bash
@@ -61,6 +61,13 @@ fi
 
 # Ensure overlay install takes precedence when ros2 launch resolves packages
 export ROS_PACKAGE_PATH="/opt/vision_ws/install:${ROS_PACKAGE_PATH:-}"
+
+# Optional TensorRT engine regeneration for compatibility after updates.
+# if [ "${FORCE_ENGINE_UPDATE:-true}" = "true" ] && [ -f "${ENGINE_FILE_PATH:-/models/yolov8s.plan}" ]; then
+#     echo "[entrypoint] FORCE_ENGINE_UPDATE=true, removing existing engine: ${ENGINE_FILE_PATH:-/models/yolov8s.plan}"
+#     rm -f "${ENGINE_FILE_PATH:-/models/yolov8s.plan}" || true
+# fi
+
 exec ros2 launch robot_bringup robot_bringup.launch.py \
     camera_only:="${CAMERA_ONLY}" \
     enable_slam:="${ENABLE_SLAM:-true}" \
@@ -71,11 +78,12 @@ exec ros2 launch robot_bringup robot_bringup.launch.py \
     cam_h:="${CAM_H:-480}" \
     net_w:="${NET_W:-640}" \
     net_h:="${NET_H:-640}" \
-    model_file_path:="${MODEL_FILE_PATH:-/models/clothes2.onnx}" \
-    engine_file_path:="${ENGINE_FILE_PATH:-/models/clothes2.plan}" \
+    model_file_path:="${MODEL_FILE_PATH:-/models/yolov8s.onnx}" \
+    engine_file_path:="${ENGINE_FILE_PATH:-/models/yolov8s.plan}" \
+    force_engine_update:="${FORCE_ENGINE_UPDATE:-true}" \
     confidence_threshold:="${CONF_TH:-0.65}" \
     nms_threshold:="${NMS_TH:-0.45}" \
-    num_classes:="${NUM_CLASSES:-1}" \
+    num_classes:="${NUM_CLASSES:-80}" \
     align_depth_enable:="${ALIGN_DEPTH:-true}" \
     enable_color:="${ENABLE_COLOR:-true}" \
     enable_depth:="${ENABLE_DEPTH:-true}" \

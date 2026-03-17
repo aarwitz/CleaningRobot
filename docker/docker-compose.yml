@@ -18,27 +18,30 @@ services:
       - "8080:8080"  # web viewer
       - "9090:9090"  # rosbridge websocket (exposed to host)
     environment:
+
       
       
       
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "all"
       CAM_W: "640"
       CAM_H: "480"
       NET_W: "640"
       NET_H: "640"
-      MODEL_FILE_PATH: "/models/clothes2.onnx"
-      ENGINE_FILE_PATH: "/models/clothes2.plan"
-      CONF_TH: "0.65"
+      MODEL_FILE_PATH: "/models/yolov8s.onnx"
+      ENGINE_FILE_PATH: "/models/yolov8s.plan"
+      CONF_TH: "0.25"
       NMS_TH: "0.45"
-      NUM_CLASSES: "1"
+      NUM_CLASSES: "80"
       CAMERA_ONLY: "false"
-      ENABLE_SLAM: "true"
-      ENABLE_YOLO: "false"
-      ALIGN_DEPTH: "false"
-      ENABLE_DEPTH: "false"
-      ENABLE_COLOR: "false"
-      ENABLE_ARM: "false"
+      ENABLE_SLAM: "false" #true
+      ENABLE_YOLO: "true"
+      ALIGN_DEPTH: "true"
+      ENABLE_DEPTH: "true"
+      ENABLE_COLOR: "true"
+      ENABLE_ARM: "true"
       ENABLE_IMU: "true"
-      CAMERA_FPS: "90"
+      CAMERA_FPS: "30"
       ENABLE_BEHAVIOR: "false"
       ENABLE_NAV2: "false"
       ENABLE_NVBLOX: "false"
@@ -49,14 +52,17 @@ services:
       ROS_DOMAIN_ID: 0
       ROS_LOCALHOST_ONLY: 1  # Confine ROS to localhost (no cross-machine discovery)
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      FASTRTPS_DEFAULT_PROFILES_FILE: /opt/vision_ws/fastdds.xml
     volumes:
+      - ./fastdds_jetson.xml:/opt/vision_ws/fastdds.xml:ro
       - /dev/bus/usb:/dev/bus/usb
       - /dev/i2c-7:/dev/i2c-7
       - ../src:/opt/vision_ws/src
       - ../tests:/opt/vision_ws/tests
+      - ../models:/models
       - slam_data:/tmp/cuvslam
       - /dev:/dev
-          devices:
+    devices:
       - /dev/bus/usb
       - /dev/i2c-7
 

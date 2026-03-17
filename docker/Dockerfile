@@ -29,12 +29,14 @@ COPY src /opt/vision_ws/src
 
 # Build workspace
 RUN . /opt/ros/humble/setup.sh && \
-    colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+    colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # Copy models, viewers, and entrypoint
 COPY models /models
+COPY docker/fastdds_jetson.xml /opt/vision_ws/fastdds.xml
 COPY slam_viewer.html /opt/vision_ws/slam_viewer.html
 COPY nvblox_viewer.html /opt/vision_ws/nvblox_viewer.html
+COPY detection_viewer.html /opt/vision_ws/detection_viewer.html
 COPY scripts/entrypoint.sh /opt/vision_ws/entrypoint.sh
 RUN chmod +x /opt/vision_ws/entrypoint.sh
 

@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>2D Detection Viewer</title>
+  <style>
+    :root {
+      --bg: #0f1720;
+      --panel: #162230;
+      --text: #d6e2ef;
+      --muted: #92a4b8;
+      --ok: #43d08a;
+      --warn: #ffd166;
+      --err: #ff6b6b;
+      --box-yolo: #43d08a;
+      --box-clothes: #ffd166;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at 10% 0%, #213047 0%, var(--bg) 45%);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 12px 16px;
+      background: rgba(8, 16, 24, 0.85);
+      border-bottom: 1px solid #2a3b4f;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-top: 10px;
+    }
+    .status {
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    .panel {
+      margin: 12px;
+      background: var(--panel);
+      border: 1px solid #2a3b4f;
+      border-radius: 10px;
+      padding: 10px;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 10px;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 5px;
+    }
+    input, button {
+      width: 100%;
+      padding: 8px;
+      border-radius: 7px;
+      border: 1px solid #30465e;
+      background: #0f1a27;
+      color: var(--text);
+      font-size: 13px;
+    }
+    button {
+      cursor: pointer;
+      background: #244767;
+      border: 1px solid #3b6791;
+      font-weight: 600;
+    }
+    button:hover { background: #2b5379; }
+    .canvas-wrap {
+      margin: 12px;
+      background: #09131d;
+      border: 1px solid #2a3b4f;
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 280px;
+    }
+    canvas {
+      width: 100%;
+      max-width: 1280px;
+      height: auto;
+      display: block;
+      background: #000;
+    }
+    .legend {
+      margin: 0 12px 12px 12px;
+      color: var(--muted);
+      font-size: 12px;
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .chip::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 6px;
+      vertical-align: -1px;
+    }
+    .chip.yolo::before { background: var(--box-yolo); }
+    .chip.clothes::before { background: var(--box-clothes); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>2D Detection Viewer</h1>
+    <div class="row">
+      <div id="conn" class="status">Connecting to rosbridge...</div>
+      <div id="stats" class="status">No frames yet</div>
+    </div>
+  </header>
+
+  <section class="panel controls">
+    <div>
+      <label>Rosbridge URL</label>
+      <input id="wsUrl" type="text" />
+    </div>
+    <div>
+      <label>Image Topic (Compressed)</label>
+      <input id="imgTopic" type="text" value="/camera/color/image_raw/compressed" />
+    </div>
+    <div>
+      <label>Image Topic Fallback (Raw)</label>
+      <input id="imgRawTopic" type="text" value="/camera/color/image_raw" />
+    </div>
+    <div>
+      <label>YOLO Detections (Detection2DArray)</label>
+      <input id="yoloTopic" type="text" value="/yolo/detections" />
+    </div>
+    <div>
+      <label>Best Detection (Detection2D)</label>
+      <input id="clothesTopic" type="text" value="/clothes/detected" />
+    </div>
+    <div>
+      <label>&nbsp;</label>
+      <button id="reconnectBtn">Reconnect</button>
+    </div>
+  </section>
+
+  <section class="canvas-wrap">
+    <canvas id="view" width="1280" height="720"></canvas>
+  </section>
+
+  <div class="legend">
+    <span class="chip yolo">YOLO boxes (/yolo/detections)</span>
+    <span class="chip clothes">Selected clothes box (/clothes/detected)</span>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+  <script>
+    const connEl = document.getElementById('conn');
+    const statsEl = document.getElementById('stats');
+    const canvas = document.getElementById('view');
+    const ctx = canvas.getContext('2d');
+    const wsUrlInput = document.getElementById('wsUrl');
+    const imgTopicInput = document.getElementById('imgTopic');
+    const imgRawTopicInput = document.getElementById('imgRawTopic');
+    const yoloTopicInput = document.getElementById('yoloTopic');
+    const clothesTopicInput = document.getElementById('clothesTopic');
+
+    const pageHost = window.location.hostname || 'localhost';
+    wsUrlInput.value = `ws://${pageHost}:9090`;
+
+    let ros = null;
+    let imgSub = null;
+    let imgRawSub = null;
+    let yoloSub = null;
+    let clothesSub = null;
+    let fallbackTimer = null;
+
+    let lastImg = null;
+    let lastYolo = [];
+    let lastClothes = null;
+    let frameCount = 0;
+    let lastStatsTs = performance.now();
+    let activeImageTopic = '';
+
+    function setConn(text, ok) {
+      connEl.textContent = text;
+      connEl.className = `status ${ok ? 'ok' : 'err'}`;
+    }
+
+    function rosDataToUint8(data) {
+      if (Array.isArray(data)) {
+        return new Uint8Array(data);
+      }
+      if (typeof data === 'string') {
+        const binary = atob(data);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes;
+      }
+      return null;
+    }
+
+    function updateStats() {
+      const now = performance.now();
+      if (now - lastStatsTs > 500) {
+        statsEl.textContent = `Frames: ${frameCount} | Image topic: ${activeImageTopic || 'n/a'} | YOLO boxes: ${lastYolo.length} | Clothes: ${lastClothes ? 'yes' : 'no'}`;
+        lastStatsTs = now;
+      }
+    }
+
+    async function decodeRawImageToBitmap(msg) {
+      const bytes = rosDataToUint8(msg.data);
+      if (!bytes) return null;
+
+      const width = msg.width;
+      const height = msg.height;
+      const encoding = String(msg.encoding || 'rgb8').toLowerCase();
+
+      // Convert common ROS encodings to RGBA for browser rendering.
+      const rgba = new Uint8ClampedArray(width * height * 4);
+      if (encoding.includes('rgb8')) {
+        for (let i = 0, j = 0; i < bytes.length && j < rgba.length; i += 3, j += 4) {
+          rgba[j] = bytes[i];
+          rgba[j + 1] = bytes[i + 1];
+          rgba[j + 2] = bytes[i + 2];
+          rgba[j + 3] = 255;
+        }
+      } else if (encoding.includes('bgr8')) {
+        for (let i = 0, j = 0; i < bytes.length && j < rgba.length; i += 3, j += 4) {
+          rgba[j] = bytes[i + 2];
+          rgba[j + 1] = bytes[i + 1];
+          rgba[j + 2] = bytes[i];
+          rgba[j + 3] = 255;
+        }
+      } else if (encoding.includes('rgba8')) {
+        for (let i = 0; i < rgba.length && i < bytes.length; i++) {
+          rgba[i] = bytes[i];
+        }
+      } else {
+        return null;
+      }
+
+      const imgData = new ImageData(rgba, width, height);
+      if (typeof createImageBitmap === 'function') {
+        return await createImageBitmap(imgData);
+      }
+
+      // Fallback for older browsers: draw to temporary canvas then load via data URL.
+      const tmp = document.createElement('canvas');
+      tmp.width = width;
+      tmp.height = height;
+      const tctx = tmp.getContext('2d');
+      tctx.putImageData(imgData, 0, 0);
+      const img = new Image();
+      img.src = tmp.toDataURL('image/png');
+      await new Promise((resolve) => { img.onload = resolve; });
+      return img;
+    }
+
+    function subscribeRawFallback() {
+      if (!ros || imgRawSub) return;
+
+      imgRawSub = new ROSLIB.Topic({
+        ros,
+        name: imgRawTopicInput.value.trim(),
+        messageType: 'sensor_msgs/Image'
+      });
+
+      imgRawSub.subscribe(async (msg) => {
+        try {
+          const bitmap = await decodeRawImageToBitmap(msg);
+          if (!bitmap) return;
+          lastImg = bitmap;
+          activeImageTopic = imgRawTopicInput.value.trim();
+          frameCount += 1;
+          updateStats();
+        } catch (_) {
+          // Keep viewer alive even if a decode attempt fails.
+        }
+      });
+    }
+
+    function netToImage(uNet, vNet, imgW, imgH, netW = 640, netH = 640) {
+      const scale = Math.min(netW / imgW, netH / imgH);
+      const padX = (netW - imgW * scale) / 2;
+      const padY = (netH - imgH * scale) / 2;
+      return {
+        x: (uNet - padX) / scale,
+        y: (vNet - padY) / scale,
+        scale
+      };
+    }
+
+    function getCenter(bbox) {
+      if (!bbox || !bbox.center) return null;
+      const pos = bbox.center.position || bbox.center;
+      if (typeof pos.x !== 'number' || typeof pos.y !== 'number') return null;
+      return { x: pos.x, y: pos.y };
+    }
+
+    function toImageSpace(centerX, centerY, sizeX, sizeY, imgW, imgH) {
+      let cx = centerX;
+      let cy = centerY;
+      let sx = sizeX;
+      let sy = sizeY;
+
+      if (cx <= 1.0 && cy <= 1.0) {
+        cx = cx * imgW;
+        cy = cy * imgH;
+        sx = (sx != null && sx <= 1.0) ? sx * imgW : sx;
+        sy = (sy != null && sy <= 1.0) ? sy * imgH : sy;
+      } else if (cx <= 640 && cy <= 640) {
+        const mapped = netToImage(cx, cy, imgW, imgH, 640, 640);
+        cx = mapped.x;
+        cy = mapped.y;
+        sx = (sx != null) ? sx / mapped.scale : sx;
+        sy = (sy != null) ? sy / mapped.scale : sy;
+      }
+
+      cx = Math.max(0, Math.min(cx, imgW - 1));
+      cy = Math.max(0, Math.min(cy, imgH - 1));
+      return { cx, cy, sx, sy };
+    }
+
+    function drawBox(det, color, label) {
+      if (!det || !det.bbox || !lastImg) return;
+      const center = getCenter(det.bbox);
+      if (!center) return;
+      const mapped = toImageSpace(center.x, center.y, det.bbox.size_x, det.bbox.size_y, lastImg.width, lastImg.height);
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+
+      if (mapped.sx != null && mapped.sy != null) {
+        const x1 = mapped.cx - mapped.sx / 2;
+        const y1 = mapped.cy - mapped.sy / 2;
+        ctx.strokeRect(x1, y1, mapped.sx, mapped.sy);
+        ctx.fillStyle = color;
+        ctx.font = '16px sans-serif';
+        const txt = `${label}`;
+        const w = ctx.measureText(txt).width + 12;
+        ctx.fillRect(x1, Math.max(0, y1 - 22), w, 22);
+        ctx.fillStyle = '#000';
+        ctx.fillText(txt, x1 + 6, Math.max(16, y1 - 6));
+      } else {
+        ctx.beginPath();
+        ctx.arc(mapped.cx, mapped.cy, 10, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
+    function render() {
+      if (!lastImg) {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#8aa0b4';
+        ctx.font = '20px sans-serif';
+        ctx.fillText('Waiting for image topic...', 20, 40);
+        ctx.font = '14px sans-serif';
+        ctx.fillText(`Connected: ${ros ? 'yes' : 'no'} | trying: ${imgTopicInput.value.trim()}`, 20, 68);
+        ctx.fillText(`fallback: ${imgRawTopicInput.value.trim()}`, 20, 90);
+        requestAnimationFrame(render);
+        return;
+      }
+
+      if (canvas.width !== lastImg.width || canvas.height !== lastImg.height) {
+        canvas.width = lastImg.width;
+        canvas.height = lastImg.height;
+      }
+
+      ctx.drawImage(lastImg, 0, 0, canvas.width, canvas.height);
+
+      for (const det of lastYolo) {
+        drawBox(det, '#43d08a', 'YOLO');
+      }
+      if (lastClothes) {
+        drawBox(lastClothes, '#ffd166', 'CLOTHES');
+      }
+
+      requestAnimationFrame(render);
+    }
+
+    function disconnectSubs() {
+      if (fallbackTimer) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+      }
+
+      [imgSub, imgRawSub, yoloSub, clothesSub].forEach((sub) => {
+        if (sub) {
+          try { sub.unsubscribe(); } catch (_) {}
+        }
+      });
+      imgSub = null;
+      imgRawSub = null;
+      yoloSub = null;
+      clothesSub = null;
+      if (ros) {
+        try { ros.close(); } catch (_) {}
+      }
+      ros = null;
+      frameCount = 0;
+      lastImg = null;
+      activeImageTopic = '';
+    }
+
+    function connect(urlCandidates) {
+      disconnectSubs();
+      setConn('Connecting to rosbridge...', false);
+
+      const candidates = Array.isArray(urlCandidates) && urlCandidates.length
+        ? urlCandidates
+        : [wsUrlInput.value.trim(), 'ws://localhost:9090', 'ws://127.0.0.1:9090'];
+
+      const currentUrl = candidates[0];
+      ros = new ROSLIB.Ros({ url: currentUrl });
+
+      ros.on('connection', () => {
+        wsUrlInput.value = currentUrl;
+        setConn(`Connected: ${currentUrl}`, true);
+
+        imgSub = new ROSLIB.Topic({
+          ros,
+          name: imgTopicInput.value.trim(),
+          messageType: 'sensor_msgs/CompressedImage'
+        });
+
+        yoloSub = new ROSLIB.Topic({
+          ros,
+          name: yoloTopicInput.value.trim(),
+          messageType: 'vision_msgs/Detection2DArray'
+        });
+
+        clothesSub = new ROSLIB.Topic({
+          ros,
+          name: clothesTopicInput.value.trim(),
+          messageType: 'vision_msgs/Detection2D'
+        });
+
+        imgSub.subscribe((msg) => {
+          const image = new Image();
+          image.onload = () => {
+            lastImg = image;
+            activeImageTopic = imgTopicInput.value.trim();
+            frameCount += 1;
+            updateStats();
+          };
+
+          if (typeof msg.data === 'string') {
+            image.src = `data:image/jpeg;base64,${msg.data}`;
+          } else {
+            const bytes = rosDataToUint8(msg.data);
+            if (!bytes) return;
+            const blob = new Blob([bytes], { type: 'image/jpeg' });
+            const url = URL.createObjectURL(blob);
+            image.onload = () => {
+              lastImg = image;
+              activeImageTopic = imgTopicInput.value.trim();
+              frameCount += 1;
+              updateStats();
+              URL.revokeObjectURL(url);
+            };
+            image.src = url;
+          }
+        });
+
+        // If no compressed frames arrive quickly, auto-subscribe to raw image topic.
+        fallbackTimer = setTimeout(() => {
+          if (frameCount === 0) {
+            setConn(`Connected, no compressed frames yet. Trying raw fallback: ${imgRawTopicInput.value.trim()}`, true);
+            subscribeRawFallback();
+          }
+        }, 3500);
+
+        yoloSub.subscribe((msg) => {
+          lastYolo = Array.isArray(msg.detections) ? msg.detections : [];
+        });
+
+        clothesSub.subscribe((msg) => {
+          lastClothes = msg || null;
+        });
+      });
+
+      ros.on('error', (err) => {
+        if (candidates.length > 1) {
+          setConn(`WebSocket failed at ${currentUrl}, trying fallback...`, false);
+          connect(candidates.slice(1));
+          return;
+        }
+        setConn(`WebSocket error: ${String(err)}`, false);
+      });
+
+      ros.on('close', () => {
+        setConn('Disconnected from rosbridge', false);
+      });
+    }
+
+    document.getElementById('reconnectBtn').addEventListener('click', connect);
+    connect();
+    render();
+  </script>
+</body>
+</html>
