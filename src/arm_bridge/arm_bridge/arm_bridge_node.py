@@ -18,6 +18,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from vision_msgs.msg import Detection2D
 from geometry_msgs.msg import PointStamped
 from std_msgs.msg import String
+from std_srvs.srv import SetBool, Trigger
 from behavior_manager_interfaces.srv import GetSock3D
 import json
 import math
@@ -82,6 +83,12 @@ class ArmBridgeNode(Node):
         self.prev_cx = 0.0
         self.prev_cy = 0.0
         self.pick_count = 0
+        # When False, the autonomous detection→pick loop is suppressed and the
+        # arm only picks on an explicit execute_pick request. The behavior
+        # manager toggles this with /arm_bridge/set_active so the arm runs only
+        # in PERCEPTION mode; left True so the node still works standalone.
+        self.active = True
+        self.latest_detection = None
 
         # ── Serial ────────────────────────────────────────────────────────
         if self.enable_arm and not self.dry_run:
@@ -105,6 +112,17 @@ class ArmBridgeNode(Node):
         self.get_3d_client = self.create_client(
             GetSock3D,
             '/clothes_perception/get_3d_pose',
+            callback_group=cb_group,
+        )
+
+        # Behavior-manager coordination: gate the autonomous loop, and a
+        # blocking pick trigger that returns real success/failure.
+        self.set_active_srv = self.create_service(
+            SetBool, '/arm_bridge/set_active', self._set_active_cb,
+            callback_group=cb_group,
+        )
+        self.execute_pick_srv = self.create_service(
+            Trigger, '/arm_bridge/execute_pick', self._execute_pick_cb,
             callback_group=cb_group,
         )
 
@@ -156,7 +174,15 @@ class ArmBridgeNode(Node):
 
     # ── Detection callback ────────────────────────────────────────────────
     def _detection_cb(self, msg: Detection2D):
+        # Always keep the most recent detection so an explicit execute_pick
+        # request has a fresh target even when the autonomous loop is off.
+        self.latest_detection = msg
+
         if self.busy:
+            return
+
+        # Autonomous loop suppressed unless explicitly activated
+        if not self.active:
             return
 
         # Cooldown guard
@@ -194,14 +220,14 @@ class ArmBridgeNode(Node):
             ).start()
 
     # ── Pick pipeline (runs in its own thread) ────────────────────────────
-    def _pick_pipeline(self, detection: Detection2D):
-        # self.busy is already True (set in _detection_cb before thread start)
+    def _pick_pipeline(self, detection: Detection2D) -> bool:
+        # self.busy is already True (set by the caller before invocation)
         try:
             # 1. Request 3D pose from clothes_perception
             point = self._request_3d_pose(detection)
             if point is None:
                 self._publish_status('3D pose request failed – returning to IDLE')
-                return
+                return False
 
             rs_x = point.point.x
             rs_y = point.point.y
@@ -212,7 +238,7 @@ class ArmBridgeNode(Node):
                 self._publish_status(
                     f'Depth {rs_z:.3f}m outside [{self.min_depth},{self.max_depth}] – skipping'
                 )
-                return
+                return False
 
             self._publish_status(
                 f'Picking at camera ({rs_x:.3f}, {rs_y:.3f}, {rs_z:.3f})m'
@@ -221,7 +247,7 @@ class ArmBridgeNode(Node):
             # 2. Execute pick
             if not self._execute_pick(rs_x, rs_y, rs_z):
                 self._publish_status('Pick sequence FAILED')
-                return
+                return False
 
             self.pick_count += 1
             self._publish_status(f'Pick #{self.pick_count} complete – placing')
@@ -231,9 +257,11 @@ class ArmBridgeNode(Node):
             self._publish_status(
                 f'Place complete – cooldown {self.cooldown_s}s'
             )
+            return True
 
         except Exception as e:
             self._publish_status(f'Pick pipeline error: {e}')
+            return False
         finally:
             self.last_pick_time = time.monotonic()
             # Reset stability state so the first detection after cooldown
@@ -242,6 +270,38 @@ class ArmBridgeNode(Node):
             self.prev_cx = 0.0
             self.prev_cy = 0.0
             self.busy = False
+
+    # ── Behavior-manager coordination services ────────────────────────────
+    def _set_active_cb(self, request, response):
+        """Enable/disable the autonomous detection→pick loop."""
+        self.active = request.data
+        state = 'active' if self.active else 'idle'
+        self._publish_status(f'Arm autonomous loop {state}')
+        response.success = True
+        response.message = f'arm {state}'
+        return response
+
+    def _execute_pick_cb(self, request, response):
+        """Blocking pick of the latest detection; returns real success.
+
+        Lets the behavior manager delegate PICK to the arm (the sole owner of
+        the serial port) instead of simulating it. Runs synchronously in this
+        callback's thread (MultiThreadedExecutor + ReentrantCallbackGroup).
+        """
+        if self.busy:
+            response.success = False
+            response.message = 'arm busy'
+            return response
+        if self.latest_detection is None:
+            response.success = False
+            response.message = 'no detection available'
+            return response
+
+        self.busy = True
+        ok = self._pick_pipeline(self.latest_detection)
+        response.success = ok
+        response.message = 'pick complete' if ok else 'pick failed'
+        return response
 
     def _request_3d_pose(self, detection: Detection2D):
         if not self.get_3d_client.wait_for_service(timeout_sec=3.0):

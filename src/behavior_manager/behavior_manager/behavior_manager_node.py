@@ -22,6 +22,7 @@ from std_srvs.srv import SetBool, Trigger
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.srv import ManageLifecycleNodes
 from vision_msgs.msg import Detection2D
 from behavior_manager_interfaces.srv import GetSock3D
 
@@ -35,6 +36,40 @@ class RobotState(Enum):
     GO_TO_BASKET = auto()
     PLACE = auto()
     RECOVER = auto()
+
+
+class OperatingMode(Enum):
+    """GPU operating modes (mutually exclusive heavy pipelines).
+
+    The Jetson Orin Nano cannot run YOLO (TensorRT) and SLAM + nvblox at full
+    rate simultaneously, so the behavior manager keeps exactly one heavy GPU
+    consumer active at a time:
+
+      NAV        - navigation active (Nav2 planning + /cmd_vel), perception/arm
+                   idle. The robot drives blind toward a fixed map-frame goal.
+      PERCEPTION - perception + arm active, navigation paused. The robot is
+                   stationary while it detects and picks.
+
+    Note: SLAM is left running in both modes so localization/TF survive the
+    switch; only the perception (YOLO) vs reconstruction (nvblox) GPU load is
+    expected to be gated externally once Phase-1 hardware measurement confirms
+    the real headroom (see _apply_gpu_pipeline).
+    """
+    NAV = auto()
+    PERCEPTION = auto()
+
+
+# Which operating mode each behavior state requires.
+STATE_OPERATING_MODE = {
+    RobotState.DETECT: OperatingMode.PERCEPTION,
+    RobotState.WANDER: OperatingMode.NAV,
+    RobotState.APPROACH_CLOTHES: OperatingMode.NAV,
+    RobotState.PICK: OperatingMode.PERCEPTION,
+    RobotState.GO_TO_BASKET: OperatingMode.NAV,
+    RobotState.PLACE: OperatingMode.PERCEPTION,
+    RobotState.RECOVER: OperatingMode.NAV,
+}
+
 
 class BehaviorManagerNode(Node):
     # ==================== State: DETECT ====================
@@ -109,6 +144,8 @@ class BehaviorManagerNode(Node):
         # Manipulation status
         self.pick_success = False
         self.place_success = False
+        # Tri-state pick result from arm_bridge: None=pending, True/False=done
+        self.pick_result = None
         
         # Service clients
         self.perception_enable_client = self.create_client(
@@ -125,6 +162,22 @@ class BehaviorManagerNode(Node):
         # Action clients
         self.nav_action_client = ActionClient(
             self, NavigateToPose, 'navigate_to_pose')
+
+        # ---- Operating-mode supervision (GPU budget) ----
+        self.declare_parameter('enable_mode_switching', True)
+        self.operating_mode = None  # set on first request_mode()
+        self.mode_pub = self.create_publisher(String, '/robot/mode', 10)
+        # Pause/resume the Nav2 lifecycle so it stops planning and emitting
+        # /cmd_vel while the robot is stationary in PERCEPTION mode.
+        self.nav_lifecycle_client = self.create_client(
+            ManageLifecycleNodes, '/lifecycle_manager_navigation/manage_nodes')
+        # Gate arm_bridge's autonomous pick loop so it only runs in PERCEPTION
+        # mode (arm_bridge owns the serial port; see Phase 6 arm delegation).
+        self.arm_active_client = self.create_client(
+            SetBool, '/arm_bridge/set_active')
+        # Delegate the actual pick to arm_bridge and get real success/failure.
+        self.arm_execute_pick_client = self.create_client(
+            Trigger, '/arm_bridge/execute_pick')
         
         # Subscribers
         self.clothes_detection_sub = self.create_subscription(
@@ -149,8 +202,9 @@ class BehaviorManagerNode(Node):
         self.state_timer = self.create_timer(0.1, self.state_machine_update)
         
         # Initialize to DETECT
+        self.request_mode(STATE_OPERATING_MODE[RobotState.DETECT])
         self.enter_detect()
-        
+
         self.get_logger().info('Behavior manager initialized in DETECT state')
     
     # ==================== State Machine Core ====================
@@ -182,9 +236,13 @@ class BehaviorManagerNode(Node):
         old_state = self.current_state
         self.current_state = new_state
         self.state_enter_time = time.time()
-        
+
         self.get_logger().info(f'State transition: {old_state.name} → {new_state.name}')
-        
+
+        # Apply the operating mode this state requires before its enter logic
+        # runs (so navigation is resumed/paused before goals are sent).
+        self.request_mode(STATE_OPERATING_MODE[new_state])
+
         # Call enter function
         if new_state == RobotState.WANDER:
             self.enter_wander()
@@ -284,21 +342,30 @@ class BehaviorManagerNode(Node):
             self.send_approach_goal(self.clothes_target)
     
     def update_approach_clothes(self):
-        """Update Nav2 goal as clothes target moves, check arrival"""
-        # Check if clothes lost
-        time_since_update = time.time() - self.last_clothes_update_time
-        if time_since_update > 5.0:
-            self.get_logger().warn('Clothes lost during approach')
-            self.transition_to(RobotState.RECOVER)
-            return
-        
+        """Drive toward the (fixed map-frame) clothes target, check arrival.
+
+        In NAV mode perception is disabled, so the target is treated as static
+        (clothes do not move) and we navigate to the captured map pose. The
+        "clothes lost" check and live goal updates only apply while perception
+        is actually running (PERCEPTION mode).
+        """
+        perception_live = self.operating_mode == OperatingMode.PERCEPTION
+
+        # Check if clothes lost (only meaningful while perception is running)
+        if perception_live:
+            time_since_update = time.time() - self.last_clothes_update_time
+            if time_since_update > 5.0:
+                self.get_logger().warn('Clothes lost during approach')
+                self.transition_to(RobotState.RECOVER)
+                return
+
         # Check if close enough to pick
         if self.is_near_clothes():
             self.transition_to(RobotState.PICK)
             return
-        
-        # Update goal if target moved significantly
-        if self.clothes_target:
+
+        # Update goal if target moved significantly (only with live perception)
+        if perception_live and self.clothes_target:
             self.update_approach_goal(self.clothes_target)
         
         # Check timeout
@@ -381,52 +448,56 @@ class BehaviorManagerNode(Node):
     # ==================== State: PICK ====================
     
     def enter_pick(self):
-        """Stop base, call 3D service, pick clothes"""
+        """Stop base and delegate the pick to arm_bridge.
+
+        PERCEPTION mode (set on transition) keeps YOLO + the arm active.
+        arm_bridge is the sole owner of the serial port: it does its own 3D
+        lookup on the latest detection and runs the grasp, then reports real
+        success via the execute_pick service.
+        """
         self.get_logger().info('Entering PICK')
-        
-        # Cancel Nav2 goal
+
+        # Cancel Nav2 goal and stop the base before the arm moves
         self.cancel_nav_goal()
-        
-        # Stop base
         self.stop_base()
-        
-        # Disable perception (no need for continuous detection during pick)
-        self.set_perception_enabled(False)
-        
-        # Call 3D service for precise position - ONLY NOW do we compute 3D!
-        if self.latest_detection is None:
-            self.get_logger().warn('No detection available for 3D lookup')
-            self.transition_to(RobotState.RECOVER)
-            return
-        
-        self.get_logger().info('Calling GetSock3D service for precise position')
-        request = GetSock3D.Request()
-        request.detection = self.latest_detection
-        
-        # Call service asynchronously
-        future = self.get_clothes_3d_client.call_async(request)
-        future.add_done_callback(self.handle_clothes_3d_response)
-        
-        # Call arm pick service (stub)
+
+        # Delegate to arm_bridge; result arrives in _arm_pick_done
         self.pick_success = False
-        
-        # Simulate pick - in real system, call arm service
-        # For now, assume success after delay
-    
+        self.pick_result = None
+        self.call_arm_execute_pick()
+
+    def call_arm_execute_pick(self):
+        """Ask arm_bridge to pick the latest detection (async)."""
+        if not self.arm_execute_pick_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn('arm execute_pick service unavailable')
+            self.pick_result = False
+            return
+        future = self.arm_execute_pick_client.call_async(Trigger.Request())
+        future.add_done_callback(self._arm_pick_done)
+
+    def _arm_pick_done(self, future):
+        try:
+            resp = future.result()
+            self.pick_result = bool(resp.success)
+            self.get_logger().info(
+                f'Arm pick result: {resp.success} ({resp.message})')
+        except Exception as e:
+            self.get_logger().error(f'execute_pick error: {e}')
+            self.pick_result = False
+
     def update_pick(self):
-        """Wait for pick completion"""
-        elapsed = time.time() - self.state_enter_time
-        
-        # Simulate pick taking 3 seconds
-        if elapsed > 3.0:
-            self.pick_success = True  # Stub - would come from arm service
-        
-        if self.pick_success:
+        """Wait for the delegated pick to complete."""
+        if self.pick_result is True:
             self.get_logger().info('Pick succeeded')
             self.transition_to(RobotState.GO_TO_BASKET)
             return
-        
-        # Check timeout
+        if self.pick_result is False:
+            self.get_logger().warn('Pick failed')
+            self.transition_to(RobotState.RECOVER)
+            return
+
+        # Still pending — guard with a timeout
+        elapsed = time.time() - self.state_enter_time
         timeout = self.get_parameter('pick_timeout_s').value
         if elapsed > timeout:
             self.get_logger().warn('Pick timeout')
@@ -570,6 +641,81 @@ class BehaviorManagerNode(Node):
         request = Trigger.Request()
         future = self.perception_reset_client.call_async(request)
     
+    # ==================== Operating-mode supervision ====================
+
+    def request_mode(self, mode: OperatingMode):
+        """Switch the active GPU operating mode (idempotent).
+
+        NAV       -> resume Nav2, disable perception + arm.
+        PERCEPTION -> pause Nav2, enable perception + arm.
+        """
+        if mode == self.operating_mode:
+            return  # already in this mode; nothing to toggle
+
+        if not self.get_parameter('enable_mode_switching').value:
+            # Switching disabled: just record/publish intent without toggling
+            # pipelines (useful when bringing the stack up all-on for testing).
+            self.operating_mode = mode
+            self._publish_mode(mode)
+            return
+
+        self.get_logger().info(
+            f'Operating mode: {self.operating_mode} → {mode.name}')
+
+        if mode == OperatingMode.NAV:
+            self._set_nav_active(True)
+            self.set_perception_enabled(False)
+            self._set_arm_active(False)
+        else:  # PERCEPTION
+            self._set_nav_active(False)
+            self.set_perception_enabled(True)
+            self._set_arm_active(True)
+
+        self._apply_gpu_pipeline(mode)
+
+        self.operating_mode = mode
+        self._publish_mode(mode)
+
+    def _publish_mode(self, mode: OperatingMode):
+        msg = String()
+        msg.data = mode.name
+        self.mode_pub.publish(msg)
+
+    def _set_nav_active(self, active: bool):
+        """Resume (active) or pause (idle) the Nav2 lifecycle manager."""
+        if not self.nav_lifecycle_client.wait_for_service(timeout_sec=0.5):
+            self.get_logger().warn(
+                'Nav2 lifecycle manager not available; cannot toggle nav',
+                throttle_duration_sec=5.0)
+            return
+        request = ManageLifecycleNodes.Request()
+        request.command = (ManageLifecycleNodes.Request.RESUME if active
+                           else ManageLifecycleNodes.Request.PAUSE)
+        self.nav_lifecycle_client.call_async(request)
+
+    def _set_arm_active(self, active: bool):
+        """Enable/disable arm_bridge's autonomous pick loop."""
+        if not self.arm_active_client.wait_for_service(timeout_sec=0.5):
+            self.get_logger().warn(
+                'arm_bridge set_active service not available',
+                throttle_duration_sec=5.0)
+            return
+        request = SetBool.Request()
+        request.data = active
+        self.arm_active_client.call_async(request)
+
+    def _apply_gpu_pipeline(self, mode: OperatingMode):
+        """Hook for gating the heavy GPU pipelines (YOLO vs nvblox).
+
+        The exact mechanism (composable-node load/unload on the vision/nvblox
+        containers, or per-pipeline enable services) is deferred until Phase-1
+        hardware measurement confirms which pipelines actually contend for the
+        GPU. Until then this only logs intent; SLAM + nvblox + YOLO all stay
+        loaded and the mode switch relies on Nav2/perception/arm gating above.
+        """
+        self.get_logger().debug(
+            f'GPU pipeline hook: target mode {mode.name} (no-op until wired)')
+
     def send_nav_goal(self, pose: PoseStamped):
         """Send a NavigateToPose goal to Nav2."""
         if not self.nav_action_client.wait_for_server(timeout_sec=1.0):
