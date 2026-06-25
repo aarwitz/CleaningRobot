@@ -15,6 +15,8 @@
   <depend>nav2_msgs</depend>
   <depend>vision_msgs</depend>
   <depend>behavior_manager_interfaces</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

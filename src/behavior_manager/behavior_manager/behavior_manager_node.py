@@ -12,6 +12,7 @@ Behavior manager is the ONLY component sending Nav2 goals.
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from enum import Enum, auto
 import time
 import math
@@ -19,12 +20,14 @@ import random
 
 from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, Twist, PointStamped
 from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ManageLifecycleNodes
 from vision_msgs.msg import Detection2D
 from behavior_manager_interfaces.srv import GetSock3D
+from tf2_ros import Buffer, TransformListener, TransformException
+import tf2_geometry_msgs  # noqa: F401  (registers PointStamped transform support)
 
 
 class RobotState(Enum):
@@ -129,11 +132,18 @@ class BehaviorManagerNode(Node):
         
         # Clothes tracking
         self.latest_detection = None  # 2D only during WANDER/APPROACH
-        self.clothes_target = None  # 3D position from service call
+        self.clothes_target = None  # 3D target as a map-frame PoseStamped
         self.clothes_first_seen_time = None
         self.clothes_frame_count = 0
         self.last_clothes_update_time = 0.0
-        
+        self.awaiting_3d = False  # a 3D-capture service call is in flight
+
+        # TF: used to convert the camera-frame 3D point to the map frame so the
+        # robot can navigate to a fixed target while perception is off (NAV mode)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.map_frame = 'map'
+
         # Navigation
         self.current_odom = None
         self.nav_goal_handle = None
@@ -274,17 +284,25 @@ class BehaviorManagerNode(Node):
         self.clothes_target = None
         self.clothes_first_seen_time = None
         self.clothes_frame_count = 0
-        
+        self.awaiting_3d = False
+
         # Send random wander goal
         self.send_random_wander_goal()
-    
+
     def update_wander(self):
         """Check for clothes detection or wander timeout"""
-        # Check if clothes detected and stable
-        if self.is_clothes_stable():
-            self.transition_to(RobotState.APPROACH_CLOTHES)
+        # On a stable detection, capture the 3D target (camera→map) BEFORE
+        # switching to NAV-mode approach — perception is live here, but goes
+        # off the moment we transition. The transition happens in the service
+        # callback once clothes_target is populated.
+        if self.is_clothes_stable() and not self.awaiting_3d:
+            self.capture_clothes_target()
             return
-        
+
+        # Don't send new wander goals while a capture is in flight
+        if self.awaiting_3d:
+            return
+
         # Check wander timeout - send new goal
         elapsed = time.time() - self.state_enter_time
         timeout = self.get_parameter('wander_timeout_s').value
@@ -586,7 +604,8 @@ class BehaviorManagerNode(Node):
         self.clothes_target = None
         self.pick_success = False
         self.place_success = False
-    
+        self.awaiting_3d = False
+
     def update_recover(self):
         """Wait briefly then return to wander"""
         elapsed = time.time() - self.state_enter_time
@@ -774,29 +793,65 @@ class BehaviorManagerNode(Node):
         
         self.clothes_frame_count += 1
     
-    def handle_clothes_3d_response(self, future):
-        """Handle 3D position service response"""
+    def capture_clothes_target(self):
+        """Request the 3D pose of the stable detection (async).
+
+        Called from WANDER while perception is live. The response is converted
+        to a fixed map-frame target in _on_clothes_3d, after which we switch to
+        APPROACH (NAV mode). Sets awaiting_3d to avoid re-entrancy.
+        """
+        if self.latest_detection is None:
+            return
+        if not self.get_clothes_3d_client.wait_for_service(timeout_sec=0.5):
+            self.get_logger().warn('get_3d_pose service unavailable; staying in WANDER')
+            return
+        self.awaiting_3d = True
+        self.get_logger().info('Stable clothes — capturing 3D map target')
+        request = GetSock3D.Request()
+        request.detection = self.latest_detection
+        future = self.get_clothes_3d_client.call_async(request)
+        future.add_done_callback(self._on_clothes_3d)
+
+    def _on_clothes_3d(self, future):
+        """Convert the camera-frame 3D point to a map-frame target, then approach."""
         try:
             response = future.result()
-            if response.success:
-                # Convert PointStamped to PoseStamped for compatibility
-                self.clothes_target = PoseStamped()
-                self.clothes_target.header = response.point.header
-                self.clothes_target.pose.position = response.point.point
-                self.clothes_target.pose.orientation.w = 1.0  # Identity orientation
-                
-                self.get_logger().info(
-                    f'Got 3D position: ({response.point.point.x:.3f}, '
-                    f'{response.point.point.y:.3f}, {response.point.point.z:.3f})'
-                )
-                
-                # In real system, would pass clothes_target to arm controller here
-            else:
-                self.get_logger().warn(f'3D service failed: {response.message}')
-                self.transition_to(RobotState.RECOVER)
         except Exception as e:
             self.get_logger().error(f'3D service error: {e}')
-            self.transition_to(RobotState.RECOVER)
+            self.awaiting_3d = False
+            return
+
+        if not response.success:
+            # Couldn't get a 3D fix — abandon this detection and keep wandering
+            self.get_logger().warn(f'3D capture failed: {response.message}')
+            self.awaiting_3d = False
+            self.call_perception_reset()
+            self.clothes_first_seen_time = None
+            self.clothes_frame_count = 0
+            return
+
+        # Transform the camera-frame point into the map frame so the target is
+        # fixed in the world and we can drive to it with perception off.
+        try:
+            point_map = self.tf_buffer.transform(
+                response.point, self.map_frame, timeout=Duration(seconds=0.5))
+        except TransformException as e:
+            self.get_logger().warn(
+                f'TF camera→map failed ({e}); cannot localize target, wandering')
+            self.awaiting_3d = False
+            return
+
+        self.clothes_target = PoseStamped()
+        self.clothes_target.header.frame_id = self.map_frame
+        self.clothes_target.header.stamp = point_map.header.stamp
+        self.clothes_target.pose.position = point_map.point
+        self.clothes_target.pose.orientation.w = 1.0
+        self.get_logger().info(
+            f'Captured map target: ({point_map.point.x:.2f}, '
+            f'{point_map.point.y:.2f}, {point_map.point.z:.2f})')
+
+        self.awaiting_3d = False
+        self.transition_to(RobotState.APPROACH_CLOTHES)
     
     def odom_callback(self, msg: Odometry):
         """Receive odometry from SLAM"""
