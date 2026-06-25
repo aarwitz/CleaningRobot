@@ -294,10 +294,21 @@ def generate_launch_description():
             'mesh_integrator_weld_vertices': True,
         }],
         remappings=[
-            ('depth/image', '/camera/aligned_depth_to_color/image_raw'),
-            ('depth/camera_info', '/camera/aligned_depth_to_color/camera_info'),
-            ('color/image', '/camera/color/image_raw'),
-            ('color/camera_info', '/camera/color/camera_info'),
+            # NOTE: this nvblox build names its inputs camera_0/* (multi-camera
+            # support). The old remap keys ('depth/image', ...) did NOT match, so
+            # nvblox silently subscribed to nonexistent /camera_0/* topics and
+            # received zero depth -> empty map. The keys must be camera_0/*.
+            #
+            # Use RAW depth (depth-module clock), not depth-aligned-to-color.
+            # nvblox places depth via TF (use_tf_transforms=True), looking up
+            # map->depth_frame at the depth timestamp. cuVSLAM only publishes TF
+            # on the infra/depth-module clock; color-aligned depth is stamped
+            # ~67ms ahead of it, so lookups would need extrapolation into the
+            # future. Raw depth shares SLAM's exact clock (measured 0.0ms).
+            ('camera_0/depth/image', '/camera/depth/image_rect_raw'),
+            ('camera_0/depth/camera_info', '/camera/depth/camera_info'),
+            ('camera_0/color/image', '/camera/color/image_raw'),
+            ('camera_0/color/camera_info', '/camera/color/camera_info'),
             ('pose', '/visual_slam/tracking/vo_pose'),
             ('pointcloud', '/nvblox/pointcloud'),
         ],

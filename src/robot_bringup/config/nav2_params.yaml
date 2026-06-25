@@ -128,7 +128,14 @@ local_costmap:
     ros__parameters:
       update_frequency: 5.0
       publish_frequency: 2.0
-      global_frame: odom
+      # Local costmap runs in the MAP frame (not odom). NvbloxCostmapLayer
+      # requires the transform from the costmap frame to the nvblox map frame
+      # to be planar (2D); cuVSLAM's map->odom is full 6DOF (small z/roll/pitch)
+      # and was rejected ("must be 2d, but it is 3d"), leaving the local costmap
+      # empty. With global_frame=map the slice transform is identity, so it is
+      # trivially planar. Tradeoff: loop-closure jumps in map are not smoothed by
+      # an odom frame here — acceptable for now; revisit with planar odometry.
+      global_frame: map
       robot_base_frame: base_link
       use_sim_time: False
       # cuVSLAM stamps its TF on the (latent) camera clock — measured ~115ms
@@ -151,8 +158,8 @@ local_costmap:
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
-        # Must match this costmap's global_frame (per NVIDIA's reference config)
-        nav2_costmap_global_frame: odom
+        # Must match this costmap's global_frame (now map → identity transform)
+        nav2_costmap_global_frame: map
         nvblox_map_slice_topic: "/nvblox_node/static_map_slice"
         convert_to_binary_costmap: True
         max_obstacle_distance: 1.0
