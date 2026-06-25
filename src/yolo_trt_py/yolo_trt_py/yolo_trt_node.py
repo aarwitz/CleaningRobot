@@ -27,6 +27,18 @@ from vision_msgs.msg import (
     ObjectHypothesisWithPose,
 )
 
+# COCO class names (80 classes) - used for mapping numeric IDs to human-readable labels
+COCO_NAMES = [
+    'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
+    'fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow',
+    'elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
+    'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle',
+    'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange',
+    'broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed',
+    'dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven',
+    'toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'
+]
+
 
 class YoloTrtNode(Node):
     def __init__(self):
@@ -36,7 +48,7 @@ class YoloTrtNode(Node):
         self.declare_parameter('model_file_path', '/models/yolov8s.onnx')
         self.declare_parameter('engine_file_path', '/models/yolov8s.plan')
         self.declare_parameter('confidence_threshold', 0.65)
-        self.declare_parameter('nms_threshold', 0.45)
+        self.declare_parameter('nms_threshold', 0.5)
         self.declare_parameter('num_classes', 80)
         self.declare_parameter('network_width', 640)
         self.declare_parameter('network_height', 640)
@@ -80,6 +92,16 @@ class YoloTrtNode(Node):
             return
 
         self._setup_ros()
+
+        # Load class names: prefer a file in /models/coco.names, otherwise use embedded list
+        try:
+            if os.path.exists('/models/coco.names'):
+                with open('/models/coco.names', 'r') as f:
+                    self.class_names = [l.strip() for l in f.readlines() if l.strip()]
+            else:
+                self.class_names = COCO_NAMES
+        except Exception:
+            self.class_names = COCO_NAMES
 
         self.get_logger().info(
             f'YoloTrtNode ready | {self.get_parameter("input_topic").value} -> '
@@ -246,7 +268,7 @@ class YoloTrtNode(Node):
         x2 = boxes[:, 0] + boxes[:, 2] / 2
         y2 = boxes[:, 1] + boxes[:, 3] / 2
 
-        keep = self._nms(x1, y1, x2, y2, max_scores)
+        keep = self._nms(x1, y1, x2, y2, max_scores, self.nms_threshold)
 
         results = []
         for i in keep:
@@ -262,7 +284,7 @@ class YoloTrtNode(Node):
         return results
 
     @staticmethod
-    def _nms(x1, y1, x2, y2, scores):
+    def _nms(x1, y1, x2, y2, scores, iou_threshold=0.5):
         areas = (x2 - x1) * (y2 - y1)
         order = scores.argsort()[::-1]
         keep = []
@@ -275,7 +297,7 @@ class YoloTrtNode(Node):
             yy2 = np.minimum(y2[i], y2[order[1:]])
             inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
             iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
-            order = order[np.where(iou <= 0.45)[0] + 1]
+            order = order[np.where(iou <= iou_threshold)[0] + 1]
         return keep
 
     # ------------------------------------------------------------- Callback
@@ -335,7 +357,15 @@ class YoloTrtNode(Node):
             det.bbox.size_y = h
 
             hyp = ObjectHypothesisWithPose()
-            hyp.hypothesis.class_id = str(class_id)
+            # Publish human-readable class name when possible; fall back to numeric id
+            try:
+                if isinstance(class_id, int) and class_id < len(self.class_names):
+                    class_name = self.class_names[class_id]
+                else:
+                    class_name = str(class_id)
+            except Exception:
+                class_name = str(class_id)
+            hyp.hypothesis.class_id = class_name
             hyp.hypothesis.score = score
             det.results.append(hyp)
 

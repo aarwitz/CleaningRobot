@@ -186,6 +186,23 @@
     const pageHost = window.location.hostname || 'localhost';
     wsUrlInput.value = `ws://${pageHost}:9090`;
 
+    // COCO class names (80 classes) for numeric ID lookups if needed
+    const COCO_CLASS_NAMES = [
+      'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
+      'fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow',
+      'elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
+      'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle',
+      'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange',
+      'broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed',
+      'dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven',
+      'toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'
+    ];
+
+    // Auto model behavior: if only class 0 is observed for a while, treat as single-class model.
+    const SINGLE_CLASS_NAME = 'clothes';
+    let seenNumericClassCount = 0;
+    let maxSeenNumericClassId = -1;
+
     let ros = null;
     let imgSub = null;
     let imgRawSub = null;
@@ -342,6 +359,57 @@
       return { cx, cy, sx, sy };
     }
 
+    function hexToRgba(hex, alpha) {
+      const clean = String(hex || '').replace('#', '');
+      if (clean.length !== 6) return `rgba(0,0,0,${alpha})`;
+      const r = parseInt(clean.slice(0, 2), 16);
+      const g = parseInt(clean.slice(2, 4), 16);
+      const b = parseInt(clean.slice(4, 6), 16);
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+
+    function drawRoundedRect(x, y, w, h, r) {
+      const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+      ctx.beginPath();
+      ctx.moveTo(x + rr, y);
+      ctx.lineTo(x + w - rr, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+      ctx.lineTo(x + w, y + h - rr);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+      ctx.lineTo(x + rr, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+      ctx.lineTo(x, y + rr);
+      ctx.quadraticCurveTo(x, y, x + rr, y);
+      ctx.closePath();
+    }
+
+    function drawLabelChip(x1, y1, label, color) {
+      const txt = String(label || '');
+      if (!txt) return;
+
+      ctx.font = '600 16px sans-serif';
+      const padX = 9;
+      const chipH = 24;
+      const chipW = ctx.measureText(txt).width + padX * 2;
+      const chipX = x1;
+      const chipY = Math.max(2, y1 - chipH - 4);
+
+      drawRoundedRect(chipX, chipY, chipW, chipH, 7);
+      ctx.fillStyle = hexToRgba(color, 0.72);
+      ctx.fill();
+
+      drawRoundedRect(chipX, chipY, chipW, chipH, 7);
+      ctx.strokeStyle = hexToRgba('#ffffff', 0.28);
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.fillStyle = '#f7fbff';
+      ctx.shadowColor = 'rgba(0,0,0,0.35)';
+      ctx.shadowBlur = 4;
+      ctx.fillText(txt, chipX + padX, chipY + 17);
+      ctx.shadowBlur = 0;
+    }
+
     function drawBox(det, color, label) {
       if (!det || !det.bbox || !lastImg) return;
       const center = getCenter(det.bbox);
@@ -355,13 +423,9 @@
         const x1 = mapped.cx - mapped.sx / 2;
         const y1 = mapped.cy - mapped.sy / 2;
         ctx.strokeRect(x1, y1, mapped.sx, mapped.sy);
-        ctx.fillStyle = color;
-        ctx.font = '16px sans-serif';
-        const txt = `${label}`;
-        const w = ctx.measureText(txt).width + 12;
-        ctx.fillRect(x1, Math.max(0, y1 - 22), w, 22);
-        ctx.fillStyle = '#000';
-        ctx.fillText(txt, x1 + 6, Math.max(16, y1 - 6));
+        if (label && label.length) {
+          drawLabelChip(x1, y1, label, color);
+        }
       } else {
         ctx.beginPath();
         ctx.arc(mapped.cx, mapped.cy, 10, 0, Math.PI * 2);
@@ -391,7 +455,42 @@
       ctx.drawImage(lastImg, 0, 0, canvas.width, canvas.height);
 
       for (const det of lastYolo) {
-        drawBox(det, '#43d08a', 'YOLO');
+        let label = '';
+        try {
+          const res = det.results && det.results[0] && det.results[0].hypothesis;
+          if (res && res.class_id != null) {
+            const cid = res.class_id;
+            if (typeof cid === 'number' || (!isNaN(Number(cid)) && String(cid).trim().length)) {
+              const idx = Number(cid);
+              const singleClassAutoMode = seenNumericClassCount > 20 && maxSeenNumericClassId === 0;
+              if (singleClassAutoMode && idx === 0) {
+                label = SINGLE_CLASS_NAME;
+              } else {
+                label = COCO_CLASS_NAMES[idx] || String(cid);
+              }
+            } else {
+              label = String(cid);
+            }
+          }
+          if (!label && det.class_name) {
+            label = String(det.class_name);
+          }
+          if (!label && det.results && det.results[0]) {
+            const r0 = det.results[0];
+            if (r0.id != null) label = String(r0.id);
+            if (!label && r0.label) label = String(r0.label);
+          }
+        } catch (_) { label = ''; }
+
+        if (label) {
+          if (label.toLowerCase().includes('cloth')) {
+            drawBox(det, '#ffd166', label.toUpperCase());
+          } else {
+            drawBox(det, '#43d08a', label);
+          }
+        } else {
+          drawBox(det, '#43d08a', '');
+        }
       }
       if (lastClothes) {
         drawBox(lastClothes, '#ffd166', 'CLOTHES');
@@ -422,6 +521,8 @@
       frameCount = 0;
       lastImg = null;
       activeImageTopic = '';
+      seenNumericClassCount = 0;
+      maxSeenNumericClassId = -1;
     }
 
     function connect(urlCandidates) {
@@ -494,6 +595,15 @@
 
         yoloSub.subscribe((msg) => {
           lastYolo = Array.isArray(msg.detections) ? msg.detections : [];
+          for (const det of lastYolo) {
+            const res = det && det.results && det.results[0] && det.results[0].hypothesis;
+            if (!res || res.class_id == null) continue;
+            const cid = res.class_id;
+            if (typeof cid === 'number' || (!isNaN(Number(cid)) && String(cid).trim().length)) {
+              seenNumericClassCount += 1;
+              maxSeenNumericClassId = Math.max(maxSeenNumericClassId, Number(cid));
+            }
+          }
         });
 
         clothesSub.subscribe((msg) => {

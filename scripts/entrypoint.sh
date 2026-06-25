@@ -82,7 +82,7 @@ exec ros2 launch robot_bringup robot_bringup.launch.py \
     engine_file_path:="${ENGINE_FILE_PATH:-/models/yolov8s.plan}" \
     force_engine_update:="${FORCE_ENGINE_UPDATE:-true}" \
     confidence_threshold:="${CONF_TH:-0.65}" \
-    nms_threshold:="${NMS_TH:-0.45}" \
+    nms_threshold:="${NMS_TH:-0.5}" \
     num_classes:="${NUM_CLASSES:-80}" \
     align_depth_enable:="${ALIGN_DEPTH:-true}" \
     enable_color:="${ENABLE_COLOR:-true}" \

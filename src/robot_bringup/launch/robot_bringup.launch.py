@@ -136,7 +136,7 @@ def generate_launch_description():
     )
     
     nms_threshold_arg = DeclareLaunchArgument(
-        'nms_threshold', default_value='0.45',
+        'nms_threshold', default_value='0.5',
         description='YOLO NMS threshold'
     )
     
