@@ -147,7 +147,10 @@ local_costmap:
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
+        # Must match this costmap's global_frame (per NVIDIA's reference config)
+        nav2_costmap_global_frame: odom
         nvblox_map_slice_topic: "/nvblox_node/static_map_slice"
+        convert_to_binary_costmap: True
         max_obstacle_distance: 1.0
         inflation_distance: 0.55
       always_send_full_costmap: True
@@ -169,7 +172,10 @@ global_costmap:
       nvblox_layer:
         plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
+        # Must match this costmap's global_frame (per NVIDIA's reference config)
+        nav2_costmap_global_frame: map
         nvblox_map_slice_topic: "/nvblox_node/static_map_slice"
+        convert_to_binary_costmap: True
         max_obstacle_distance: 1.0
         inflation_distance: 0.55
       inflation_layer:
