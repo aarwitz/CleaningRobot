@@ -136,33 +136,20 @@ local_costmap:
       height: 3
       resolution: 0.05
       robot_radius: 0.22
-      plugins: ["voxel_layer", "inflation_layer"]
+      plugins: ["nvblox_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
         inflation_radius: 0.55
-      voxel_layer:
-        plugin: "nav2_costmap_2d::VoxelLayer"
+      # nvblox publishes a 2D ESDF distance slice (esdf_2d + distance_slice in the
+      # nvblox node params); the NvbloxCostmapLayer reads it directly instead of
+      # raytracing a PointCloud2 through a VoxelLayer.
+      nvblox_layer:
+        plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
-        publish_voxel_map: True
-        origin_z: 0.0
-        z_resolution: 0.05
-        z_voxels: 16
-        max_obstacle_height: 2.0
-        mark_threshold: 0
-        observation_sources: depth
-        depth:
-          topic: /nvblox_node/static_occupancy
-          max_obstacle_height: 2.0
-          clearing: True
-          marking: True
-          data_type: "PointCloud2"
-          raytrace_max_range: 3.0
-          raytrace_min_range: 0.0
-          obstacle_max_range: 2.5
-          obstacle_min_range: 0.0
-      static_layer:
-        map_subscribe_transient_local: True
+        nvblox_map_slice_topic: "/nvblox_node/static_map_slice"
+        max_obstacle_distance: 1.0
+        inflation_distance: 0.55
       always_send_full_costmap: True
 
 global_costmap:
@@ -176,20 +163,15 @@ global_costmap:
       robot_radius: 0.22
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      obstacle_layer:
-        plugin: "nav2_costmap_2d::ObstacleLayer"
+      # Live nvblox reconstruction only — no pre-saved static map, so the
+      # StaticLayer is dropped and the nvblox ESDF slice provides obstacles.
+      plugins: ["nvblox_layer", "inflation_layer"]
+      nvblox_layer:
+        plugin: "nvblox::nav2::NvbloxCostmapLayer"
         enabled: True
-        observation_sources: depth
-        depth:
-          topic: /nvblox_node/static_occupancy
-          max_obstacle_height: 2.0
-          clearing: True
-          marking: True
-          data_type: "PointCloud2"
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: True
+        nvblox_map_slice_topic: "/nvblox_node/static_map_slice"
+        max_obstacle_distance: 1.0
+        inflation_distance: 0.55
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0

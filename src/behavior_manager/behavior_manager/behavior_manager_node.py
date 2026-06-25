@@ -21,9 +21,9 @@ from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
-# from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateToPose
 from vision_msgs.msg import Detection2D
-from behavior_manager_interfaces.srv import Get3DPose
+from behavior_manager_interfaces.srv import GetSock3D
 
 
 class RobotState(Enum):
@@ -116,15 +116,15 @@ class BehaviorManagerNode(Node):
         self.perception_reset_client = self.create_client(
             Trigger, '/clothes_perception/reset_target')
         self.get_clothes_3d_client = self.create_client(
-            Get3DPose, '/clothes_perception/get_3d_pose')
+            GetSock3D, '/clothes_perception/get_3d_pose')
         
         # Would be arm service clients (stubs for now)
         # self.arm_pick_client = self.create_client(...)
         # self.arm_place_client = self.create_client(...)
         
         # Action clients
-        # self.nav_action_client = ActionClient(
-        #     self, NavigateToPose, 'navigate_to_pose')
+        self.nav_action_client = ActionClient(
+            self, NavigateToPose, 'navigate_to_pose')
         
         # Subscribers
         self.clothes_detection_sub = self.create_subscription(
@@ -399,8 +399,8 @@ class BehaviorManagerNode(Node):
             self.transition_to(RobotState.RECOVER)
             return
         
-        self.get_logger().info('Calling Get3DPose service for precise position')
-        request = Get3DPose.Request()
+        self.get_logger().info('Calling GetSock3D service for precise position')
+        request = GetSock3D.Request()
         request.detection = self.latest_detection
         
         # Call service asynchronously
@@ -571,9 +571,23 @@ class BehaviorManagerNode(Node):
         future = self.perception_reset_client.call_async(request)
     
     def send_nav_goal(self, pose: PoseStamped):
-        """Send Nav2 action goal (stubbed)"""
-        # Navigation disabled in minimal DETECT mode
-        pass
+        """Send a NavigateToPose goal to Nav2."""
+        if not self.nav_action_client.wait_for_server(timeout_sec=1.0):
+            self.get_logger().warn(
+                'navigate_to_pose action server not available; goal dropped')
+            return
+
+        # Reset result so update_* states wait for this goal's completion
+        self.nav_goal_result = None
+
+        goal = NavigateToPose.Goal()
+        goal.pose = pose
+        self.get_logger().info(
+            f'Sending Nav2 goal: ({pose.pose.position.x:.2f}, '
+            f'{pose.pose.position.y:.2f}) in {pose.header.frame_id}')
+
+        send_goal_future = self.nav_action_client.send_goal_async(goal)
+        send_goal_future.add_done_callback(self.nav_goal_response_callback)
     
     def cancel_nav_goal(self):
         """Cancel active Nav2 goal"""
