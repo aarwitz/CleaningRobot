@@ -575,11 +575,24 @@ def generate_launch_description():
         # https://nvidia-isaac-ros.github.io/v/release-3.1/troubleshooting/hardware_setup.html
         # links to the issue here: https://github.com/realsenseai/realsense-ros/issues/2507#issuecomment-1411214372
         # 
+        # The single param-set at +3s used to DIE (exit 1): the RealSense node's
+        # parameter service isn't up that early (USB enumeration runs well past
+        # 3s), so "ros2 param set" hit "node not found". When this re-apply
+        # fails, auto-exposure never re-enables, infra drops to ~15Hz (long
+        # exposure), and cuVSLAM starves and drifts. Retry until it lands.
         TimerAction(
-            period=3.0,
+            period=5.0,
             actions=[
                 ExecuteProcess(
-                    cmd=['ros2', 'param', 'set', '/camera/camera', 'depth_module.enable_auto_exposure', 'true'],
+                    cmd=['bash', '-c',
+                         'for i in $(seq 1 40); do '
+                         '  if ros2 param set /camera/camera '
+                         'depth_module.enable_auto_exposure true; then '
+                         '    echo "[auto-exposure] re-applied OK on attempt $i"; exit 0; '
+                         '  fi; '
+                         '  sleep 2; '
+                         'done; '
+                         'echo "[auto-exposure] FAILED to re-apply after retries"; exit 1'],
                     output='screen'
                 )
             ]
