@@ -229,6 +229,16 @@ def generate_launch_description():
         parameters=[{
             'enable_image_denoising': False,
             'rectified_images': False,
+            # Ground-plane constraints: this is a strictly planar ground robot, so
+            # constrain both the VO and the SLAM/loop-closure pose to z=0 (no
+            # roll/pitch/z). Without these, a bad loop-closure relocalization
+            # teleported the pose to z=10-47 m while stationary (robot is on the
+            # floor) and froze there, with vo_state still reporting SUCCESS —
+            # garbage map pose that breaks the whole map frame (nvblox slice +
+            # Nav2). Constraining to the plane makes that catastrophic z-jump
+            # impossible. See memory slam-drift-from-15hz-infra (Part 2).
+            'enable_ground_constraint_in_odometry': True,
+            'enable_ground_constraint_in_slam': True,
             'enable_imu_fusion': enable_imu,
             'gyro_noise_density': 0.000244,
             'gyro_random_walk': 0.000019393,
