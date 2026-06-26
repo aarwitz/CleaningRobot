@@ -34,17 +34,17 @@ services:
       NMS_TH: "0.5"
       NUM_CLASSES: "80"
       CAMERA_ONLY: "false"
-      ENABLE_SLAM: "false" #true
-      ENABLE_YOLO: "true"
+      ENABLE_SLAM: "true"
+      ENABLE_YOLO: "false"
       ALIGN_DEPTH: "true"
       ENABLE_DEPTH: "true"
       ENABLE_COLOR: "true"
-      ENABLE_ARM: "true"
+      ENABLE_ARM: "false"
       ENABLE_IMU: "true"
       CAMERA_FPS: "30"
       ENABLE_BEHAVIOR: "false"
-      ENABLE_NAV2: "false"
-      ENABLE_NVBLOX: "false"
+      ENABLE_NAV2: "true"
+      ENABLE_NVBLOX: "true"
       ENABLE_VISUALIZATION: "true"
       # CYCLONEDDS_URI: /root/.cyclonedds.xml
       # RMW_IMPLEMENTATION: rmw_cyclonedds_cpp

@@ -178,6 +178,13 @@ global_costmap:
       robot_radius: 0.22
       resolution: 0.05
       track_unknown_space: true
+      # No pre-saved static map: nvblox is built live as the robot explores, so
+      # the global costmap rolls with the robot (a fixed-origin grid left the
+      # robot "out of bounds of the costmap" and planning always failed). 10x10m
+      # gives planning headroom around the robot.
+      rolling_window: true
+      width: 10
+      height: 10
       # Live nvblox reconstruction only — no pre-saved static map, so the
       # StaticLayer is dropped and the nvblox ESDF slice provides obstacles.
       plugins: ["nvblox_layer", "inflation_layer"]
