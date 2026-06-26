@@ -281,8 +281,20 @@ def generate_launch_description():
             'voxel_size': 0.05,  # 5cm voxels
             'esdf': True,  # Enable ESDF for navigation
             'esdf_2d': True,  # Enable 2D slice for Nav2 costmap
-            'esdf_2d_min_height': 0.0,
-            'esdf_2d_max_height': 2.0,
+            # The costmap reads /nvblox_node/static_map_slice, so the SLICE BAND
+            # that matters is static_mapper.esdf_slice_{min,max}_height. NOTE: the
+            # 'esdf_2d_min_height'/'esdf_2d_max_height' keys this build does NOT
+            # declare were silently ignored, so nvblox used its default min=0.0 =
+            # the floor. The slice band is in the map frame where z=0 is the floor
+            # (base_link sits at floor level); the level camera at 0.2 m sees the
+            # ground entering its FOV ~0.36 m ahead, so min=0.0 flattened that
+            # floor into the costmap as a lethal "wall" ~0.3 m in front, blocking
+            # every forward goal. min=0.10 m clears the floor (plus voxel noise)
+            # so only real obstacles taller than 10 cm count. Clothes/socks on the
+            # floor are pick targets, not nav obstacles, so excluding them is
+            # correct. max=1.0 captures furniture/walls.
+            'static_mapper.esdf_slice_min_height': 0.10,
+            'static_mapper.esdf_slice_max_height': 1.0,
             'distance_slice': True,
             'mesh': True,  # Enable mesh output for visualization
             'max_tsdf_update_hz': 10.0,
