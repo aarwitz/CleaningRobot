@@ -450,7 +450,7 @@ def generate_launch_description():
             'bus_id': 7,
             'i2c_addr': 0x34,
             'ticks_per_meter': 18940.0,
-            'track_width': 0.256,
+            'wheel_geom_L': 0.25,  # lx+ly (half-wheelbase+half-track); scales omega
             'cmd_per_mps': 240.0,
             'control_rate': 20.0,
         }],
