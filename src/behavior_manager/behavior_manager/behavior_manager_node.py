@@ -25,7 +25,7 @@ from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ManageLifecycleNodes
 from vision_msgs.msg import Detection2D
-from behavior_manager_interfaces.srv import GetSock3D
+from behavior_manager_interfaces.srv import GetSock3D, DriveRelative
 from tf2_ros import Buffer, TransformListener, TransformException
 import tf2_geometry_msgs  # noqa: F401  (registers PointStamped transform support)
 
@@ -125,18 +125,48 @@ class BehaviorManagerNode(Node):
         self.declare_parameter('pick_timeout_s', 30.0)
         self.declare_parameter('wander_perception_rate_hz', 3.0)
         self.declare_parameter('approach_perception_rate_hz', 8.0)
-        
+
+        # Approach strategy. 'encoder' (default) drives SLAM-free via the
+        # motor_controller DriveRelative service in visual-servo hops using the
+        # camera-frame bearing/range to the target — cuVSLAM odometry is not
+        # reliable enough in this environment for map-frame Nav2 approach. 'nav'
+        # is the legacy Nav2 map-frame approach (kept as a fallback).
+        self.declare_parameter('approach_mode', 'encoder')
+        # Per-hop translation cap for the visual-servo approach: crab at most
+        # this far toward the target, then re-detect and repeat.
+        self.declare_parameter('approach_step_m', 0.30)
+        # Yaw is OFF by default: this mecanum base crabs at the target instead of
+        # pivoting (pivots brown out / brick the I2C driver). If a future gripper
+        # needs the base square to the target, set approach_use_yaw True; the
+        # per-hop yaw is then capped to approach_max_yaw_step_rad and kept gentle.
+        self.declare_parameter('approach_use_yaw', False)
+        self.declare_parameter('approach_max_yaw_step_rad', 0.4)
+        # Master gate. When False the state machine does NOT run its per-state
+        # logic (no wandering, no driving) — only state publishing and the
+        # /behavior/test_drive hook stay live. Lets the node be brought up safely
+        # for bring-up/wiring tests without it driving off autonomously.
+        self.declare_parameter('autonomous_enabled', True)
+        self.autonomous_enabled = self.get_parameter('autonomous_enabled').value
+
         # State
         self.current_state = RobotState.WANDER
         self.state_enter_time = time.time()
         
+        self.approach_mode = self.get_parameter('approach_mode').value
+
         # Clothes tracking
         self.latest_detection = None  # 2D only during WANDER/APPROACH
         self.clothes_target = None  # 3D target as a map-frame PoseStamped
+        self.clothes_target_cam = None  # latest 3D target as a camera-frame point
         self.clothes_first_seen_time = None
         self.clothes_frame_count = 0
         self.last_clothes_update_time = 0.0
         self.awaiting_3d = False  # a 3D-capture service call is in flight
+
+        # Encoder visual-servo approach state
+        self.approach_move_active = False   # a DriveRelative hop is in flight
+        self.approach_last_hop = None       # actuals from the last hop
+        self.approach_redetect_pending = False  # need a fresh 3D fix before next hop
 
         # TF: used to convert the camera-frame 3D point to the map frame so the
         # robot can navigate to a fixed target while perception is off (NAV mode)
@@ -164,7 +194,11 @@ class BehaviorManagerNode(Node):
             Trigger, '/clothes_perception/reset_target')
         self.get_clothes_3d_client = self.create_client(
             GetSock3D, '/clothes_perception/get_3d_pose')
-        
+        # SLAM-free relative motion (encoder closed-loop) executed by
+        # motor_controller_node — the approach driver in 'encoder' mode.
+        self.drive_relative_client = self.create_client(
+            DriveRelative, '/motor_controller/drive_relative')
+
         # Would be arm service clients (stubs for now)
         # self.arm_pick_client = self.create_client(...)
         # self.arm_place_client = self.create_client(...)
@@ -203,7 +237,14 @@ class BehaviorManagerNode(Node):
             self.odom_callback,
             10
         )
-        
+
+        # Bring-up/test hook: publish a Twist on /behavior/test_drive to issue a
+        # single DriveRelative hop (linear.x=dx m, linear.y=dy m, angular.z=dyaw
+        # rad) through the same path the approach uses — lets us validate the
+        # behavior_manager -> motor_controller wiring without a clothing target.
+        self.test_drive_sub = self.create_subscription(
+            Twist, '/behavior/test_drive', self.test_drive_callback, 10)
+
         # Publishers
         self.state_pub = self.create_publisher(String, '/robot/state', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -221,6 +262,13 @@ class BehaviorManagerNode(Node):
     
     def state_machine_update(self):
         """Main state machine loop"""
+        # Master gate: when disabled, run no state logic (no autonomous driving);
+        # still publish state below and keep the /behavior/test_drive hook live.
+        if not self.autonomous_enabled:
+            state_msg = String()
+            state_msg.data = self.current_state.name
+            self.state_pub.publish(state_msg)
+            return
         # Check transitions based on current state
         if self.current_state == RobotState.DETECT:
             self.update_detect()
@@ -346,16 +394,28 @@ class BehaviorManagerNode(Node):
     def enter_approach_clothes(self):
         """Cancel wander, enable moderate perception, approach clothes"""
         self.get_logger().info('Entering APPROACH_CLOTHES')
-        
+
         # Cancel any existing goal
         self.cancel_nav_goal()
-        
+
         # Enable perception at higher rate
         rate_hz = self.get_parameter('approach_perception_rate_hz').value
         self.set_perception_enabled(True)
         self.get_logger().info(f'Perception rate increased to {rate_hz} Hz')
-        
-        # Send initial approach goal
+
+        if self.approach_mode == 'encoder':
+            # SLAM-free visual-servo approach: perception stays live and the
+            # update loop issues DriveRelative hops from the camera-frame target.
+            # PERCEPTION posture pauses Nav2 so it can't fight DriveRelative on
+            # /cmd_vel; transition_to() applied NAV before this, so flip it.
+            self.request_mode(OperatingMode.PERCEPTION)
+            self.approach_move_active = False
+            self.approach_redetect_pending = False
+            self.approach_last_hop = None
+            # We already have a fresh camera target from the WANDER capture.
+            return
+
+        # Legacy 'nav' approach: send the first map-frame goal.
         if self.clothes_target:
             self.send_approach_goal(self.clothes_target)
     
@@ -367,6 +427,10 @@ class BehaviorManagerNode(Node):
         "clothes lost" check and live goal updates only apply while perception
         is actually running (PERCEPTION mode).
         """
+        if self.approach_mode == 'encoder':
+            self._update_approach_encoder()
+            return
+
         perception_live = self.operating_mode == OperatingMode.PERCEPTION
 
         # Check if clothes lost (only meaningful while perception is running)
@@ -462,7 +526,159 @@ class BehaviorManagerNode(Node):
         
         stop_dist = self.get_parameter('approach_stop_distance_m').value
         return dist < stop_dist
-    
+
+    # ---------- Encoder (SLAM-free) visual-servo approach ----------
+
+    def _update_approach_encoder(self):
+        """Drive toward the clothes in DriveRelative hops using the camera-frame
+        bearing/range — no SLAM. One hop at a time, re-detecting between hops so
+        the approach is closed-loop on perception, not on cuVSLAM odometry."""
+        # Overall timeout.
+        elapsed = time.time() - self.state_enter_time
+        if elapsed > self.get_parameter('approach_timeout_s').value:
+            self.get_logger().warn('Approach timeout (encoder)')
+            self.transition_to(RobotState.RECOVER)
+            return
+
+        # A hop or a 3D refresh is in flight — wait for it.
+        if self.approach_move_active or self.awaiting_3d:
+            return
+
+        # After a hop we re-detect before computing the next one (the robot — and
+        # possibly the target — moved). Also refresh if we have no target yet.
+        if self.approach_redetect_pending or self.clothes_target_cam is None:
+            self._request_clothes_3d_refresh()
+            return
+
+        # Lost the target for too long → recover.
+        if time.time() - self.last_clothes_update_time > 5.0:
+            self.get_logger().warn('Clothes lost during encoder approach')
+            self.transition_to(RobotState.RECOVER)
+            return
+
+        dx, dy, dyaw, rng = self._compute_hop_from_cam(self.clothes_target_cam)
+
+        # Close enough → hand off to PICK.
+        if rng <= self.get_parameter('approach_stop_distance_m').value:
+            self.get_logger().info(f'Within stop distance ({rng:.2f} m) → PICK')
+            self.transition_to(RobotState.PICK)
+            return
+
+        # Nothing meaningful to command but not yet within stop distance: take a
+        # minimum forward nudge toward the target to make progress.
+        if abs(dx) < 0.02 and abs(dy) < 0.02 and abs(dyaw) < 0.03:
+            dx = min(self.get_parameter('approach_step_m').value,
+                     max(0.05, rng - self.get_parameter('grasp_offset_m').value))
+
+        self._issue_drive_relative(dx, dy, dyaw, tag='approach')
+
+    def _compute_hop_from_cam(self, point_cam: PointStamped):
+        """Map a camera-optical-frame target point to a bounded body-frame hop.
+
+        Optical frame is x=right, y=down, z=forward. Body: forward=+z_opt,
+        left=-x_opt. This base is mecanum/holonomic, so it CRABS straight at the
+        target (forward+strafe) instead of pivoting — an in-place yaw spins all
+        four wheels against each other, spikes current, and browns out / bricks
+        the I2C driver (see memory motor-driver-i2c-contention-kills-board). Yaw
+        is therefore off by default; enable approach_use_yaw only if the gripper
+        needs the base square to the target, and then it's small and gentle.
+        Returns (dx, dy, dyaw, horizontal_range)."""
+        x = point_cam.point.x
+        z = point_cam.point.z
+        rng = math.hypot(x, z)
+
+        step = self.get_parameter('approach_step_m').value
+        grasp = self.get_parameter('grasp_offset_m').value
+
+        # Translate toward the target, stopping grasp_offset short, capped to step.
+        advance = max(0.0, min(step, rng - grasp))
+        if rng > 1e-3:
+            dx = advance * (z / rng)        # body forward component
+            dy = advance * (-x / rng)       # body left component
+        else:
+            dx = dy = 0.0
+
+        dyaw = 0.0
+        if self.get_parameter('approach_use_yaw').value:
+            max_yaw = self.get_parameter('approach_max_yaw_step_rad').value
+            bearing = math.atan2(-x, z)
+            dyaw = max(-max_yaw, min(max_yaw, bearing))
+        return dx, dy, dyaw, rng
+
+    def _request_clothes_3d_refresh(self):
+        """Ask clothes_perception for a fresh 3D fix on the latest detection and
+        store it as the camera-frame target (no state transition)."""
+        if self.latest_detection is None:
+            return
+        if not self.get_clothes_3d_client.service_is_ready():
+            return
+        self.awaiting_3d = True
+        request = GetSock3D.Request()
+        request.detection = self.latest_detection
+        future = self.get_clothes_3d_client.call_async(request)
+        future.add_done_callback(self._on_approach_3d)
+
+    def _on_approach_3d(self, future):
+        self.awaiting_3d = False
+        try:
+            response = future.result()
+        except Exception as e:
+            self.get_logger().error(f'approach 3D refresh error: {e}')
+            return
+        if not response.success:
+            self.get_logger().warn(
+                f'approach 3D refresh failed: {response.message}',
+                throttle_duration_sec=2.0)
+            return
+        self.clothes_target_cam = response.point
+        self.last_clothes_update_time = time.time()
+        self.approach_redetect_pending = False
+
+    def _issue_drive_relative(self, dx, dy, dyaw, tag='move'):
+        """Fire a single DriveRelative hop (async). Sets approach_move_active so
+        the state machine waits for completion."""
+        if not self.drive_relative_client.service_is_ready():
+            if not self.drive_relative_client.wait_for_service(timeout_sec=0.5):
+                self.get_logger().warn(
+                    'drive_relative service unavailable; hop dropped',
+                    throttle_duration_sec=5.0)
+                return
+        request = DriveRelative.Request()
+        request.dx = float(dx)
+        request.dy = float(dy)
+        request.dyaw = float(dyaw)
+        self.approach_move_active = True
+        self.get_logger().info(
+            f'[{tag}] hop: dx={dx:.3f} dy={dy:.3f} dyaw={math.degrees(dyaw):.1f}deg')
+        future = self.drive_relative_client.call_async(request)
+        future.add_done_callback(lambda f: self._on_drive_relative_done(f, tag))
+
+    def _on_drive_relative_done(self, future, tag):
+        try:
+            response = future.result()
+        except Exception as e:
+            self.get_logger().error(f'[{tag}] drive_relative error: {e}')
+            self.approach_move_active = False
+            return
+        self.approach_last_hop = response
+        self.get_logger().info(
+            f'[{tag}] hop done: actual dx={response.actual_dx:.3f} '
+            f'dy={response.actual_dy:.3f} dyaw={math.degrees(response.actual_dyaw):.1f}deg '
+            f'success={response.success}')
+        self.approach_move_active = False
+        if tag == 'approach':
+            # Re-detect before the next hop so the approach stays closed-loop.
+            self.approach_redetect_pending = True
+
+    def test_drive_callback(self, msg: Twist):
+        """Bring-up hook: /behavior/test_drive Twist -> one DriveRelative hop
+        (linear.x=dx m, linear.y=dy m, angular.z=dyaw rad)."""
+        if self.approach_move_active:
+            self.get_logger().warn('test_drive ignored: a hop is already active')
+            return
+        self._issue_drive_relative(msg.linear.x, msg.linear.y, msg.angular.z,
+                                   tag='test')
+
     # ==================== State: PICK ====================
     
     def enter_pick(self):
@@ -830,8 +1046,23 @@ class BehaviorManagerNode(Node):
             self.clothes_frame_count = 0
             return
 
-        # Transform the camera-frame point into the map frame so the target is
-        # fixed in the world and we can drive to it with perception off.
+        # Always keep the raw camera-frame point — the encoder approach servos
+        # on its bearing/range directly (no SLAM needed).
+        self.clothes_target_cam = response.point
+        self.last_clothes_update_time = time.time()
+
+        if self.approach_mode == 'encoder':
+            self.get_logger().info(
+                f'Captured camera target: ({response.point.point.x:.2f}, '
+                f'{response.point.point.y:.2f}, {response.point.point.z:.2f}) — '
+                f'encoder approach')
+            self.awaiting_3d = False
+            self.transition_to(RobotState.APPROACH_CLOTHES)
+            return
+
+        # Legacy 'nav' approach: transform the camera-frame point into the map
+        # frame so the target is fixed in the world and we can drive to it with
+        # perception off.
         try:
             point_map = self.tf_buffer.transform(
                 response.point, self.map_frame, timeout=Duration(seconds=0.5))
