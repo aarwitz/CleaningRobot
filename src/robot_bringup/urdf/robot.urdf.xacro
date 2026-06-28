@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="cleaning_robot">
-  
+
   <!-- Base link - center of robot -->
   <link name="base_link">
     <visual>
@@ -29,12 +29,97 @@
   <joint name="camera_joint" type="fixed">
     <parent link="base_link"/>
     <child link="camera_link"/>
-    <!-- Camera mounted 10cm forward, 20cm up from base center -->
-    <origin xyz="0.1 0 0.2" rpy="0 0 0"/>
+    <!-- Camera mounted 10cm forward of base center. Height and pitch CALIBRATED
+         on hardware (2026-06-28): a floor-plane fit of the live depth + the
+         bottom-row floor returns put the real camera at ~0.12 m above the floor
+         (not the 0.20 m previously assumed) with a ~2.5 deg downward pitch. The
+         old level/0.20 m values lifted nvblox's reconstructed floor to ~+0.08 m
+         and ramped it with distance, so the floor crossed the 0.10 m ESDF costmap
+         slice and showed up as a phantom lethal wall ~0.6-1.4 m ahead. With the
+         true height/pitch the floor reconstructs near z=0 and drops out of the
+         slice. pitch=+0.0436 rad (2.5 deg) tilts camera_link's +x (forward) down. -->
+    <origin xyz="0.1 0 0.12" rpy="0 0.0436 0"/>
   </joint>
 
   <!-- Camera optical frames (published by realsense2_camera) -->
   <!-- These are defined by the RealSense driver, but we include the camera_link
        which is the parent frame that the driver's frames will be relative to -->
+
+  <!-- ====================================================================== -->
+  <!-- Waveshare RoArm-M2 arm                                                  -->
+  <!--                                                                         -->
+  <!-- Kinematic chain transcribed verbatim from waveshareteam/roarm_ws        -->
+  <!-- (ros2-humble) roarm_description/urdf/roarm_m2/roarm_m2.xacro. Links are -->
+  <!-- prefixed "arm_" to avoid colliding with this robot's own base_link, and -->
+  <!-- carry NO visual/collision geometry on purpose: robot_state_publisher    -->
+  <!-- only needs the joint structure to emit each link's TF, and the depth    -->
+  <!-- self-filter builds its collision-sphere model in the node (not from     -->
+  <!-- URDF meshes, which we don't ship). The joint NAMES below are the         -->
+  <!-- contract with arm_bridge's /joint_states publisher.                     -->
+  <!--                                                                         -->
+  <!-- !!! CALIBRATE: arm_mount_* below is an ESTIMATE of where the arm base   -->
+  <!-- bolts onto base_link (from the robot photos). The shape mask only lands -->
+  <!-- on the real arm pixels if this transform is right; refine it on hardware-->
+  <!-- by aligning the projected arm spheres to the arm in the depth image.    -->
+  <!-- ====================================================================== -->
+  <xacro:property name="arm_mount_xyz" value="0.12 0 0.22"/>
+  <xacro:property name="arm_mount_rpy" value="0 0 0"/>
+
+  <link name="arm_base_link"/>
+  <link name="arm_link1"/>
+  <link name="arm_link2"/>
+  <link name="arm_link3"/>
+  <link name="arm_gripper_link"/>
+  <link name="arm_hand_tcp"/>
+
+  <!-- Mount: base_link -> arm_base_link (fixed; CALIBRATE origin) -->
+  <joint name="arm_mount_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="arm_base_link"/>
+    <origin xyz="${arm_mount_xyz}" rpy="${arm_mount_rpy}"/>
+  </joint>
+
+  <!-- joint1: base yaw -->
+  <joint name="arm_joint1" type="revolute">
+    <parent link="arm_base_link"/>
+    <child link="arm_link1"/>
+    <origin xyz="0.01 0 0.123" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.1416" upper="3.1416" effort="10" velocity="3.14"/>
+  </joint>
+
+  <!-- joint2: shoulder -->
+  <joint name="arm_joint2" type="revolute">
+    <parent link="arm_link1"/>
+    <child link="arm_link2"/>
+    <origin xyz="0 0 0" rpy="-1.5708 -1.5708 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.5708" upper="1.5708" effort="10" velocity="3.14"/>
+  </joint>
+
+  <!-- joint3: elbow -->
+  <joint name="arm_joint3" type="revolute">
+    <parent link="arm_link2"/>
+    <child link="arm_link3"/>
+    <origin xyz="0.2368 0.03 0" rpy="0 0 1.5708"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.0" upper="2.95" effort="10" velocity="3.14"/>
+  </joint>
+
+  <!-- joint4: gripper (jaw) -->
+  <joint name="arm_gripper_joint" type="revolute">
+    <parent link="arm_link3"/>
+    <child link="arm_gripper_link"/>
+    <origin xyz="0.002906 -0.21599 -0.00067" rpy="-1.5708 0 -1.5708"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="0.0" upper="1.5" effort="10" velocity="3.14"/>
+  </joint>
+
+  <!-- Tool centre point (fixed, end of link3) -->
+  <joint name="arm_hand_tcp_joint" type="fixed">
+    <parent link="arm_link3"/>
+    <child link="arm_hand_tcp"/>
+    <origin xyz="0.002 -0.2802 0" rpy="1.5708 0 -1.5708"/>
+  </joint>
 
 </robot>
