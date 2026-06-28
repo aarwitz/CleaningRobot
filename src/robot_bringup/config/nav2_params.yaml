@@ -72,8 +72,12 @@ controller_server:
     # Progress checker parameters
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.5
-      movement_time_allowance: 10.0
+      # required_movement_radius was 0.5, which made ANY goal shorter than 0.5 m
+      # impossible to satisfy — the checker aborted the action as "stuck" before
+      # the robot ever reached the goal. 0.25 m within 15 s still catches a truly
+      # wedged robot but lets short approach hops complete.
+      required_movement_radius: 0.25
+      movement_time_allowance: 15.0
     
     # Goal checker parameters
     general_goal_checker:
@@ -275,10 +279,18 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 1.0]
-    min_velocity: [-0.26, 0.0, -1.0]
-    max_accel: [2.5, 0.0, 3.2]
-    max_decel: [-2.5, 0.0, -3.2]
+    # Y (strafe) MUST be enabled here to match DWB's max_vel_y (±0.22). Previously
+    # this was clamped to 0 while DWB still commanded sideways velocity, so every
+    # strafe command was zeroed mid-stream — the robot got contradictory cmd_vel
+    # (DWB says crab, smoother says don't) and jerked/oscillated. That oscillation
+    # is what threw cuVSLAM's visual odometry into a multi-metre XY teleport. With
+    # y enabled the holonomic command passes through cleanly and the base crabs
+    # smoothly instead of pivoting (pivoting browns out the I2C driver — see the
+    # FollowPath comment and memory motor-driver-i2c-contention-kills-board).
+    max_velocity: [0.26, 0.22, 1.0]
+    min_velocity: [-0.26, -0.22, -1.0]
+    max_accel: [2.5, 2.5, 3.2]
+    max_decel: [-2.5, -2.5, -3.2]
     odom_topic: "/visual_slam/tracking/odometry"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
