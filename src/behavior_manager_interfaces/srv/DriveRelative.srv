@@ -1,0 +1,12 @@
+# Relative, closed-loop body-frame move executed by motor_controller_node using
+# encoder feedback (move->pause->read). SLAM-independent. Axes are applied
+# sequentially (yaw, then forward, then strafe); any axis left 0 is skipped.
+float64 dx      # forward translation, metres (+ = forward)
+float64 dy      # strafe translation, metres (+ = left)
+float64 dyaw    # yaw rotation, radians (+ = counter-clockwise)
+---
+bool success
+float64 actual_dx     # measured forward translation (m), from encoders
+float64 actual_dy     # measured strafe translation (m)
+float64 actual_dyaw   # measured yaw rotation (rad)
+string message

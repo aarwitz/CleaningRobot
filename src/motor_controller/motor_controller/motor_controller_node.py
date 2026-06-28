@@ -56,12 +56,16 @@ contention above unless the firmware/wiring is fixed.
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from std_srvs.srv import Trigger
+from behavior_manager_interfaces.srv import DriveRelative
 import smbus
 import struct
 import time
+import math
 from enum import Enum
 
 
@@ -125,6 +129,27 @@ class MotorControllerNode(Node):
         # Open-loop by default — see I2C CONTENTION note in the module docstring.
         self.declare_parameter('use_encoder_feedback', False)
 
+        # --- DriveRelative (closed-loop relative move) parameters ---
+        # The relative-move service drives a bounded body-frame displacement using
+        # encoder feedback in a move->pause->read loop. Reads are safe because the
+        # service and the control loop share one mutually-exclusive callback group
+        # (they never run at the same time), so an encoder read never races a motor
+        # write. Slip factors map wheel-odometry to true ground motion (calibrated
+        # on hardware 2026-06-28): forward has no roller slip; strafe/yaw do.
+        self.declare_parameter('k_strafe', 0.89)        # ground/odom for strafe
+        self.declare_parameter('k_yaw', 0.97)           # ground/odom for yaw
+        self.declare_parameter('move_lin_speed', 0.14)  # m/s burst (>deadband)
+        self.declare_parameter('move_yaw_speed', 0.6)   # rad/s burst
+        self.declare_parameter('move_tol_lin', 0.015)   # m
+        self.declare_parameter('move_tol_yaw', 0.052)   # rad (~3 deg)
+        self.declare_parameter('move_undershoot', 0.85) # approach from below
+        self.declare_parameter('move_burst_min', 0.20)  # s (clear deadband ramp)
+        self.declare_parameter('move_burst_max', 1.00)  # s
+        self.declare_parameter('move_max_iters', 10)
+        self.declare_parameter('move_max_lin', 1.0)     # per-call bound, m
+        self.declare_parameter('move_max_yaw', 1.57)    # per-call bound, rad
+        self.declare_parameter('move_settle_sec', 0.9)  # idle wait before read
+
         self.bus_id = self.get_parameter('bus_id').value
         self.i2c_addr = self.get_parameter('i2c_addr').value
         self.ticks_per_meter = self.get_parameter('ticks_per_meter').value
@@ -141,6 +166,20 @@ class MotorControllerNode(Node):
         self.max_ticks_per_sec = self.get_parameter('max_ticks_per_sec').value
         self.cmd_timeout = self.get_parameter('cmd_timeout').value
         self.use_encoder_feedback = self.get_parameter('use_encoder_feedback').value
+
+        self.k_strafe = self.get_parameter('k_strafe').value
+        self.k_yaw = self.get_parameter('k_yaw').value
+        self.move_lin_speed = self.get_parameter('move_lin_speed').value
+        self.move_yaw_speed = self.get_parameter('move_yaw_speed').value
+        self.move_tol_lin = self.get_parameter('move_tol_lin').value
+        self.move_tol_yaw = self.get_parameter('move_tol_yaw').value
+        self.move_undershoot = self.get_parameter('move_undershoot').value
+        self.move_burst_min = self.get_parameter('move_burst_min').value
+        self.move_burst_max = self.get_parameter('move_burst_max').value
+        self.move_max_iters = self.get_parameter('move_max_iters').value
+        self.move_max_lin = self.get_parameter('move_max_lin').value
+        self.move_max_yaw = self.get_parameter('move_max_yaw').value
+        self.move_settle_sec = self.get_parameter('move_settle_sec').value
 
         self.dt = 1.0 / self.control_rate
 
@@ -170,13 +209,33 @@ class MotorControllerNode(Node):
         self.enc_last = [0, 0, 0, 0]
         self.t_last = time.monotonic()
 
+        # While a DriveRelative move is executing the service callback owns the
+        # I2C bus exclusively; _abort lets the (reentrant) e-stop interrupt it
+        # between bursts without ever touching I2C itself.
+        self._move_active = False
+        self._abort = False
+
+        # Callback groups: the control loop, /cmd_vel, and the relative-move
+        # service all do I2C, so they share ONE mutually-exclusive group — the
+        # executor never runs two of them at once, so no read ever races a write.
+        # E-stop is reentrant and I2C-free (it only sets flags), so it can fire
+        # even while a multi-second move is blocking the I2C group.
+        self.io_group = MutuallyExclusiveCallbackGroup()
+        self.estop_group = ReentrantCallbackGroup()
+
         # --- ROS interfaces ---
         self.cmd_vel_sub = self.create_subscription(
-            Twist, '/cmd_vel', self.cmd_vel_callback, 10)
+            Twist, '/cmd_vel', self.cmd_vel_callback, 10,
+            callback_group=self.io_group)
         self.odom_pub = self.create_publisher(Odometry, '/wheel_odom', 10)
         self.estop_srv = self.create_service(
-            Trigger, 'motor_controller/emergency_stop', self.estop_callback)
-        self.control_timer = self.create_timer(self.dt, self.control_loop)
+            Trigger, 'motor_controller/emergency_stop', self.estop_callback,
+            callback_group=self.estop_group)
+        self.drive_rel_srv = self.create_service(
+            DriveRelative, 'motor_controller/drive_relative',
+            self.drive_relative_callback, callback_group=self.io_group)
+        self.control_timer = self.create_timer(
+            self.dt, self.control_loop, callback_group=self.io_group)
 
         # Keep zero-writing for a short window after going idle, then go quiet to
         # minimize I2C traffic (motors latch the last command).
@@ -236,21 +295,163 @@ class MotorControllerNode(Node):
 
     def estop_callback(self, request, response):
         self.get_logger().warn('Emergency stop requested!')
+        # I2C-free: just set flags. _abort interrupts an in-progress relative
+        # move between bursts; the control loop / move loop do the actual stop
+        # write so this never races a motor write on the bus.
+        self._abort = True
         self.state = State.STOPPING
         self.vx_ref = self.vy_ref = self.wz_ref = 0.0
         response.success = True
         response.message = 'Emergency stop activated'
         return response
 
-    def _wheel_refs(self):
-        """Forward-driving wheel speed targets (m/s) per channel."""
+    def _wheel_refs_from(self, vx, vy, wz):
+        """Forward-driving wheel speed targets (m/s) per channel for a body
+        velocity (vx fwd, vy left, wz CCW)."""
         return [
-            self.vx_ref * KX[i] + self.vy_ref * KY[i] + self.wz_ref * self.L * KW[i]
+            vx * KX[i] + vy * KY[i] + wz * self.L * KW[i]
             for i in range(4)
         ]
 
+    def _wheel_refs(self):
+        """Forward-driving wheel speed targets (m/s) per channel."""
+        return self._wheel_refs_from(self.vx_ref, self.vy_ref, self.wz_ref)
+
+    # --- DriveRelative (closed-loop relative move) ---
+    def _compute_cmd4(self, vx, vy, wz):
+        """Open-loop feedforward channel commands for a body velocity, with the
+        same rate-limit + deadband clamp as the main control loop."""
+        w_ref = self._wheel_refs_from(vx, vy, wz)
+        cmd4 = [0, 0, 0, 0]
+        for i in range(4):
+            u = self._rate_limit(self.cmd_per_mps * w_ref[i], self.u_prev[i])
+            self.u_prev[i] = u
+            cmd4[i] = self._clamp_cmd(SIGN[i] * u)
+        return cmd4
+
+    def _read_wheels(self):
+        """Per-wheel forward-positive distance (m) from encoders. Caller MUST be
+        on the io_group (no concurrent motor write)."""
+        enc = self._read_encoders()
+        return [SIGN[i] * enc[i] / self.ticks_per_meter for i in range(4)]
+
+    def _body_disp(self, w0, w):
+        """Body-frame (dx fwd, dy left, dyaw CCW) from start wheel dists w0 -> w,
+        with slip factors applied so the result is true ground motion."""
+        d = [w[i] - w0[i] for i in range(4)]
+        dx = (d[0] + d[1] + d[2] + d[3]) / 4.0
+        dy = (d[0] + d[1] - d[2] - d[3]) / 4.0 * self.k_strafe
+        dyaw = (d[0] - d[1] - d[2] + d[3]) / (4.0 * self.L) * self.k_yaw
+        return [dx, dy, dyaw]
+
+    def _drive_burst(self, vx, vy, wz, seconds):
+        """Drive a body velocity for `seconds`, ramped via _compute_cmd4."""
+        n = max(1, int(seconds * self.control_rate))
+        for _ in range(n):
+            if self._abort:
+                break
+            self._write_motors(self._compute_cmd4(vx, vy, wz))
+            time.sleep(self.dt)
+
+    def _stop_and_settle(self):
+        """Ramp to a stop, then go quiet on the bus so the next encoder read is
+        clean (no write/read interleave)."""
+        for _ in range(12):
+            for i in range(4):
+                self.u_prev[i] *= 0.6
+            self._write_motors([self._clamp_cmd(SIGN[i] * self.u_prev[i]) for i in range(4)])
+            time.sleep(self.dt)
+        self.u_prev = [0.0, 0.0, 0.0, 0.0]
+        self._write_motors([0, 0, 0, 0])
+        time.sleep(self.move_settle_sec)
+
+    def _run_axis(self, w_start, idx, target, vmag, tol, is_yaw):
+        """Closed-loop drive of one body axis (0=fwd,1=strafe,2=yaw) to target."""
+        for _ in range(self.move_max_iters):
+            if self._abort:
+                return
+            moved = self._body_disp(w_start, self._read_wheels())[idx]
+            remaining = target - moved
+            if abs(remaining) <= tol:
+                return
+            direction = 1.0 if remaining > 0 else -1.0
+            # effective speed: forward/strafe under-deliver ~74%; yaw ~full.
+            speed_eff = vmag * (1.0 if is_yaw else 0.74)
+            burst = max(self.move_burst_min,
+                        min(self.move_burst_max,
+                            self.move_undershoot * abs(remaining) / max(speed_eff, 1e-3)))
+            vx = direction * vmag if idx == 0 else 0.0
+            vy = direction * vmag if idx == 1 else 0.0
+            wz = direction * vmag if idx == 2 else 0.0
+            self._drive_burst(vx, vy, wz, burst)
+            self._stop_and_settle()
+
+    def drive_relative_callback(self, request, response):
+        if not self.bus:
+            response.success = False
+            response.message = 'no I2C bus'
+            return response
+        if (abs(request.dx) > self.move_max_lin or abs(request.dy) > self.move_max_lin
+                or abs(request.dyaw) > self.move_max_yaw):
+            response.success = False
+            response.message = (
+                f'target exceeds per-call bounds (|lin|<={self.move_max_lin} m, '
+                f'|yaw|<={self.move_max_yaw} rad)')
+            return response
+
+        self._abort = False
+        self._move_active = True
+        self.state = State.IDLE
+        self.vx_ref = self.vy_ref = self.wz_ref = 0.0
+        self.u_prev = [0.0, 0.0, 0.0, 0.0]
+        self.get_logger().info(
+            f'DriveRelative: dx={request.dx:.3f} dy={request.dy:.3f} dyaw={request.dyaw:.3f}')
+        final = [0.0, 0.0, 0.0]
+        try:
+            w_start = self._read_wheels()
+            # Sequential: aim (yaw) first, then forward, then strafe. Cross-axis
+            # coupling is negligible (validated), so one start baseline suffices.
+            plan = [
+                (2, request.dyaw, self.move_yaw_speed, self.move_tol_yaw, True),
+                (0, request.dx, self.move_lin_speed, self.move_tol_lin, False),
+                (1, request.dy, self.move_lin_speed, self.move_tol_lin, False),
+            ]
+            for idx, target, vmag, tol, is_yaw in plan:
+                if abs(target) <= tol:
+                    continue
+                self._run_axis(w_start, idx, target, vmag, tol, is_yaw)
+                if self._abort:
+                    break
+            final = self._body_disp(w_start, self._read_wheels())
+        except Exception as e:
+            self.get_logger().error(f'DriveRelative error: {e}')
+            response.success = False
+            response.message = f'error: {e}'
+        finally:
+            self.u_prev = [0.0, 0.0, 0.0, 0.0]
+            try:
+                self._write_motors([0, 0, 0, 0])
+            except Exception:
+                pass
+            self._move_active = False
+            self.state = State.IDLE
+
+        response.actual_dx, response.actual_dy, response.actual_dyaw = final
+        if not response.message or response.message == '':
+            response.success = not self._abort
+            response.message = 'aborted by e-stop' if self._abort else 'ok'
+        self.get_logger().info(
+            f'DriveRelative done: actual dx={final[0]:.3f} dy={final[1]:.3f} '
+            f'dyaw={math.degrees(final[2]):.1f}deg success={response.success}')
+        return response
+
     # --- Control loop ---
     def control_loop(self):
+        # A DriveRelative move owns the I2C bus while it runs; stay off the bus.
+        # (The shared mutually-exclusive callback group already prevents overlap;
+        # this is belt-and-suspenders in case the executor config ever changes.)
+        if self._move_active:
+            return
         # Command timeout -> ramp to stop.
         time_since_cmd = (self.get_clock().now() - self.last_cmd_time).nanoseconds / 1e9
         if time_since_cmd > self.cmd_timeout and self.state == State.RUNNING:
@@ -364,8 +565,12 @@ class MotorControllerNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = MotorControllerNode()
+    # MultiThreaded so the reentrant e-stop can fire while a relative move blocks
+    # the I2C (io) group. The io group itself stays serialized (no bus race).
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
