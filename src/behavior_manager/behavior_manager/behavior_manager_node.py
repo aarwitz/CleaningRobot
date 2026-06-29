@@ -18,7 +18,7 @@ import time
 import math
 import random
 
-from std_msgs.msg import String
+from std_msgs.msg import String, Empty
 from std_srvs.srv import SetBool, Trigger
 from geometry_msgs.msg import PoseStamped, Twist, PointStamped
 from nav_msgs.msg import Odometry
@@ -147,6 +147,11 @@ class BehaviorManagerNode(Node):
         # for bring-up/wiring tests without it driving off autonomously.
         self.declare_parameter('autonomous_enabled', True)
         self.autonomous_enabled = self.get_parameter('autonomous_enabled').value
+        # Exploration gate. When False the node will NOT autonomously wander or
+        # auto-approach a detected target — WANDER becomes idle and an approach
+        # only begins when explicitly triggered via /behavior/start_approach.
+        # Use for supervised approach tests so the robot never drives on sight.
+        self.declare_parameter('autonomous_wander', True)
 
         # State
         self.current_state = RobotState.WANDER
@@ -245,6 +250,14 @@ class BehaviorManagerNode(Node):
         self.test_drive_sub = self.create_subscription(
             Twist, '/behavior/test_drive', self.test_drive_callback, 10)
 
+        # Supervised-test hook: publish std_msgs/Empty on /behavior/start_approach
+        # to enter APPROACH_CLOTHES directly from the current live detection,
+        # bypassing WANDER (which drives random Nav2-on-VO goals). Captures the
+        # latest detection's 3D camera-frame point and hands off to the encoder
+        # approach loop. Lets us validate autonomous approach without wandering.
+        self.start_approach_sub = self.create_subscription(
+            Empty, '/behavior/start_approach', self.start_approach_callback, 10)
+
         # Publishers
         self.state_pub = self.create_publisher(String, '/robot/state', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -339,6 +352,11 @@ class BehaviorManagerNode(Node):
 
     def update_wander(self):
         """Check for clothes detection or wander timeout"""
+        # Supervised gate: when autonomous wandering is disabled, stay idle here —
+        # no random goals and no auto-capture. An approach is started only by an
+        # explicit /behavior/start_approach trigger (start_approach_callback).
+        if not self.get_parameter('autonomous_wander').value:
+            return
         # On a stable detection, capture the 3D target (camera→map) BEFORE
         # switching to NAV-mode approach — perception is live here, but goes
         # off the moment we transition. The transition happens in the service
@@ -678,6 +696,25 @@ class BehaviorManagerNode(Node):
             return
         self._issue_drive_relative(msg.linear.x, msg.linear.y, msg.angular.z,
                                    tag='test')
+
+    def start_approach_callback(self, _msg: Empty):
+        """Supervised-test hook: enter APPROACH_CLOTHES from the current live
+        detection, bypassing WANDER. Requires a recent /clothes/detected and
+        autonomous_enabled (so the state loop runs the encoder approach)."""
+        if self.current_state == RobotState.APPROACH_CLOTHES:
+            self.get_logger().warn('start_approach ignored: already approaching')
+            return
+        if self.latest_detection is None:
+            self.get_logger().warn(
+                'start_approach ignored: no live /clothes/detected yet')
+            return
+        if not self.autonomous_enabled:
+            self.get_logger().warn(
+                'start_approach: autonomous_enabled is false — approach loop '
+                'will not drive; enable it to move')
+        self.get_logger().info('start_approach: capturing target from live detection')
+        self.awaiting_3d = False
+        self.capture_clothes_target()
 
     # ==================== State: PICK ====================
     

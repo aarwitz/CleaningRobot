@@ -319,47 +319,53 @@ class ClothesPerceptionNode(Node):
         cx = self.camera_info.k[2]
         cy = self.camera_info.k[5]
         
-        # Extract depth window around center (using IMAGE coordinates)
-        window_size = self.get_parameter('depth_window_size').value
-        half_win = window_size // 2
-        
+        # Extract depth around the detection center (IMAGE coordinates). The near
+        # floor has large depth holes (D455 grazing-angle dropout), so a tiny
+        # fixed window often lands entirely on zeros. Grow the window — bounded to
+        # the detection's own bbox extent so we never wander onto far background —
+        # until enough valid samples appear.
         u_int = int(u_img)
         v_int = int(v_img)
-        
-        # Check bounds
         h, w = depth_image.shape
-        if not (half_win <= u_int < w - half_win and half_win <= v_int < h - half_win):
+        if not (0 <= u_int < w and 0 <= v_int < h):
             self.get_logger().warn(f'Bbox center out of bounds: ({u_int}, {v_int})')
             return None
-        
-        # Extract window
-        window = depth_image[
-            v_int - half_win:v_int + half_win + 1,
-            u_int - half_win:u_int + half_win + 1
-        ]
-        
-        # Debug: log window stats
-        self.get_logger().debug(
-            f'Bbox at ({u_int}, {v_int}), window: '
-            f'zeros={np.sum(window == 0)}, '
-            f'nans={np.sum(~np.isfinite(window))}, '
-            f'valid={np.sum((window > 0) & np.isfinite(window))}, '
-            f'min={window[window > 0].min() if np.any(window > 0) else 0:.3f}, '
-            f'max={window[window > 0].max() if np.any(window > 0) else 0:.3f}'
-        )
-        
-        # Get valid depths (ignore 0 and NaN)
-        valid_depths = window[(window > 0) & (np.isfinite(window))]
-        
+
+        # bbox size is in network coords; convert to image pixels (same letterbox
+        # scale, no offset) to cap how far the search may grow.
+        scale = min(self.get_parameter('net_w').value / float(self.camera_info.width),
+                    self.get_parameter('net_h').value / float(self.camera_info.height))
+        bbox_half = 0.5 * max(detection.bbox.size_x, detection.bbox.size_y) / max(scale, 1e-6)
+        max_half = int(min(max(bbox_half, 8.0), 60.0))
+        base_half = max(1, self.get_parameter('depth_window_size').value // 2)
+
+        valid_depths = np.array([])
+        used_half = base_half
+        for half_win in sorted({base_half, 7, 12, 20, 30, max_half}):
+            if half_win < 1:
+                continue
+            used_half = half_win
+            u0, u1 = max(0, u_int - half_win), min(w, u_int + half_win + 1)
+            v0, v1 = max(0, v_int - half_win), min(h, v_int + half_win + 1)
+            window = depth_image[v0:v1, u0:u1]
+            valid_depths = window[(window > 0) & np.isfinite(window)]
+            if len(valid_depths) >= 8 or half_win >= max_half:
+                break
+
         if len(valid_depths) == 0:
             self.get_logger().warn(
-                f'No valid depth in window at ({u_int}, {v_int}): '
-                f'{np.sum(window == 0)} zeros, {np.sum(~np.isfinite(window))} invalid'
-            )
+                f'No valid depth near ({u_int}, {v_int}) within {max_half}px '
+                f'(floor depth dropout)')
             return None
-        
-        # Compute median depth
-        depth_m = float(np.median(valid_depths))
+
+        # Near-side estimate: the 30th percentile leans toward the closer (target)
+        # surface rather than farther floor/background that leaked into a big
+        # window. The approach re-detects each hop, so a rough range self-corrects;
+        # the bearing (u-cx)/fx is exact regardless of depth magnitude.
+        depth_m = float(np.percentile(valid_depths, 30))
+        self.get_logger().info(
+            f'Depth near ({u_int},{v_int}) win={used_half*2+1}px '
+            f'n={len(valid_depths)} -> {depth_m:.3f}m', throttle_duration_sec=1.0)
         
         # Check depth range
         min_depth = self.get_parameter('min_depth_m').value
