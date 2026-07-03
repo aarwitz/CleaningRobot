@@ -2,15 +2,28 @@
 <dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
   <profiles>
     <transport_descriptors>
+      <!-- Shared memory first: image topics are ~300 KB at 30 Hz; over plain
+           UDPv4 each message is ~200 fragments and best-effort subscribers
+           (e.g. cuVSLAM) lose whole frames to single-fragment drops — measured
+           2026-07-02: VSLAM received only every 3rd stereo pair. SHM makes
+           localhost delivery loss-free and cheap. -->
+      <transport_descriptor>
+        <transport_id>shm_transport</transport_id>
+        <type>SHM</type>
+        <segment_size>10485760</segment_size>
+      </transport_descriptor>
       <transport_descriptor>
         <transport_id>udp_transport</transport_id>
         <type>UDPv4</type>
+        <sendBufferSize>10485760</sendBufferSize>
+        <receiveBufferSize>10485760</receiveBufferSize>
       </transport_descriptor>
     </transport_descriptors>
     <participant profile_name="default_profile" is_default_profile="true">
       <rtps>
         <useBuiltinTransports>false</useBuiltinTransports>
         <userTransports>
+          <transport_id>shm_transport</transport_id>
           <transport_id>udp_transport</transport_id>
         </userTransports>
       </rtps>

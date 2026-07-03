@@ -61,6 +61,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallb
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from std_srvs.srv import Trigger
+from std_msgs.msg import Float32
 from behavior_manager_interfaces.srv import DriveRelative
 import smbus
 import struct
@@ -139,14 +140,20 @@ class MotorControllerNode(Node):
         self.declare_parameter('k_strafe', 0.89)        # ground/odom for strafe
         self.declare_parameter('k_yaw', 0.97)           # ground/odom for yaw
         self.declare_parameter('move_lin_speed', 0.14)  # m/s burst (>deadband)
-        self.declare_parameter('move_yaw_speed', 0.6)   # rad/s burst
+        # 0.6 rad/s bricks the HiWonder driver (board falls off the I2C bus on
+        # the NEXT transaction); 0.4 ran 23 consecutive turns clean 2026-07-02.
+        self.declare_parameter('move_yaw_speed', 0.4)   # rad/s burst
         self.declare_parameter('move_tol_lin', 0.015)   # m
         self.declare_parameter('move_tol_yaw', 0.052)   # rad (~3 deg)
         self.declare_parameter('move_undershoot', 0.85) # approach from below
         self.declare_parameter('move_burst_min', 0.20)  # s (clear deadband ramp)
         self.declare_parameter('move_burst_max', 1.00)  # s
+        # Vector (fwd+strafe) moves: faster and much longer single bursts so a
+        # multi-meter path segment is one continuous glide, not hop-stutter
+        self.declare_parameter('move_vec_speed', 0.20)      # m/s command
+        self.declare_parameter('move_burst_max_vec', 8.0)   # s
         self.declare_parameter('move_max_iters', 10)
-        self.declare_parameter('move_max_lin', 1.0)     # per-call bound, m
+        self.declare_parameter('move_max_lin', 2.0)     # per-call bound, m
         self.declare_parameter('move_max_yaw', 1.57)    # per-call bound, rad
         self.declare_parameter('move_settle_sec', 0.9)  # idle wait before read
 
@@ -176,6 +183,8 @@ class MotorControllerNode(Node):
         self.move_undershoot = self.get_parameter('move_undershoot').value
         self.move_burst_min = self.get_parameter('move_burst_min').value
         self.move_burst_max = self.get_parameter('move_burst_max').value
+        self.move_vec_speed = self.get_parameter('move_vec_speed').value
+        self.move_burst_max_vec = self.get_parameter('move_burst_max_vec').value
         self.move_max_iters = self.get_parameter('move_max_iters').value
         self.move_max_lin = self.get_parameter('move_max_lin').value
         self.move_max_yaw = self.get_parameter('move_max_yaw').value
@@ -205,6 +214,7 @@ class MotorControllerNode(Node):
         self.pid = [WheelPID(self.kp, self.ki, self.i_clamp) for _ in range(4)]
         self.w_f = [0.0, 0.0, 0.0, 0.0]      # filtered measured wheel speeds
         self.u_prev = [0.0, 0.0, 0.0, 0.0]   # last raw commands (rate limiting)
+        self._last_write_t = 0.0             # monotonic time of last motor write
 
         self.enc_last = [0, 0, 0, 0]
         self.t_last = time.monotonic()
@@ -228,6 +238,11 @@ class MotorControllerNode(Node):
             Twist, '/cmd_vel', self.cmd_vel_callback, 10,
             callback_group=self.io_group)
         self.odom_pub = self.create_publisher(Odometry, '/wheel_odom', 10)
+        self.battery_pub = self.create_publisher(Float32, '/battery_voltage', 10)
+        # Idle-only battery poll: reads only when motors have been stopped
+        # >2 s (the 0x34 driver bricks if reads interleave with motion).
+        self.battery_timer = self.create_timer(
+            30.0, self._battery_timer_cb, callback_group=self.io_group)
         self.estop_srv = self.create_service(
             Trigger, 'motor_controller/emergency_stop', self.estop_callback,
             callback_group=self.estop_group)
@@ -272,6 +287,7 @@ class MotorControllerNode(Node):
         if not self.bus:
             return
         block = [int(c) & 0xFF for c in cmd4]
+        self._last_write_t = time.monotonic()
         self._i2c_retry(self.bus.write_i2c_block_data, self.i2c_addr, 0x33, block)
 
     def _clamp_cmd(self, u):
@@ -374,8 +390,17 @@ class MotorControllerNode(Node):
             raw = self._i2c_retry(self.bus.read_i2c_block_data, self.i2c_addr, 0x00, 2)
             mv = struct.unpack('<H', bytes(raw))[0]
             self.get_logger().info(f'battery: {mv} mV')
+            self.battery_pub.publish(Float32(data=mv / 1000.0))
         except OSError as e:
             self.get_logger().warn(f'battery read failed: {e}')
+
+    def _battery_timer_cb(self):
+        """Slow idle-only battery poll for telemetry/UI. Skips whenever the
+        motors have written within 2 s — reads must never interleave with
+        motion (same brick rule as encoder reads)."""
+        if any(self.u_prev) or (time.monotonic() - self._last_write_t) < 2.0:
+            return
+        self._log_battery()
 
     def _run_axis(self, w_start, idx, target, vmag, tol, is_yaw):
         """Closed-loop drive of one body axis (0=fwd,1=strafe,2=yaw) to target."""
@@ -396,6 +421,27 @@ class MotorControllerNode(Node):
             vy = direction * vmag if idx == 1 else 0.0
             wz = direction * vmag if idx == 2 else 0.0
             self._drive_burst(vx, vy, wz, burst)
+            self._stop_and_settle()
+
+    def _run_vector(self, w_start, tx, ty, vmag, tol):
+        """Closed-loop simultaneous forward+strafe: one long continuous burst
+        along the remaining (dx, dy) vector, re-aimed after each settle. This
+        replaces the axis-sequential fwd-then-strafe (visibly jerky L-shaped
+        moves). Encoders are still read ONLY between bursts."""
+        for _ in range(self.move_max_iters):
+            if self._abort:
+                return
+            d = self._body_disp(w_start, self._read_wheels())
+            rx, ry = tx - d[0], ty - d[1]
+            rem = math.hypot(rx, ry)
+            if rem <= tol:
+                return
+            ux, uy = rx / rem, ry / rem
+            speed_eff = vmag * 0.74
+            burst = max(self.move_burst_min,
+                        min(self.move_burst_max_vec,
+                            self.move_undershoot * rem / max(speed_eff, 1e-3)))
+            self._drive_burst(ux * vmag, uy * vmag, 0.0, burst)
             self._stop_and_settle()
 
     def drive_relative_callback(self, request, response):
@@ -421,19 +467,14 @@ class MotorControllerNode(Node):
         final = [0.0, 0.0, 0.0]
         try:
             w_start = self._read_wheels()
-            # Sequential: aim (yaw) first, then forward, then strafe. Cross-axis
-            # coupling is negligible (validated), so one start baseline suffices.
-            plan = [
-                (2, request.dyaw, self.move_yaw_speed, self.move_tol_yaw, True),
-                (0, request.dx, self.move_lin_speed, self.move_tol_lin, False),
-                (1, request.dy, self.move_lin_speed, self.move_tol_lin, False),
-            ]
-            for idx, target, vmag, tol, is_yaw in plan:
-                if abs(target) <= tol:
-                    continue
-                self._run_axis(w_start, idx, target, vmag, tol, is_yaw)
-                if self._abort:
-                    break
+            # Yaw first (aim), then forward+strafe together as one smooth
+            # vector move. Cross-axis coupling is negligible (validated).
+            if abs(request.dyaw) > self.move_tol_yaw:
+                self._run_axis(w_start, 2, request.dyaw, self.move_yaw_speed,
+                               self.move_tol_yaw, True)
+            if not self._abort and math.hypot(request.dx, request.dy) > self.move_tol_lin:
+                self._run_vector(w_start, request.dx, request.dy,
+                                 self.move_vec_speed, self.move_tol_lin)
             final = self._body_disp(w_start, self._read_wheels())
         except Exception as e:
             self.get_logger().error(f'DriveRelative error: {e}')

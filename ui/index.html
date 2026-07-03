@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SUDS // MISSION CONTROL</title>
+<style>
+  :root {
+    --bg:        #05080c;
+    --bg-deep:   #030507;
+    --panel:     #0a1016;
+    --panel-2:   #0d151d;
+    --line:      #123540;
+    --line-hot:  #1d5a6b;
+    --ink:       #cfe6ee;
+    --muted:     #5b7683;
+    --dim:       #33454f;
+    --cyan:      #67e8f9;   /* text accent */
+    --cyan-mark: #0891b2;   /* data marks (validated) */
+    --amber:     #fcd34d;   /* text accent */
+    --amber-mark:#d97706;   /* data marks (validated) */
+    --good:      #059669;   /* status marks (validated) */
+    --good-txt:  #34d399;
+    --warn:      #d97706;
+    --warn-txt:  #fbbf24;
+    --crit:      #ef4444;   /* status marks (validated) */
+    --crit-txt:  #f87171;
+    --mono: ui-monospace, "JetBrains Mono", "Cascadia Mono", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink);
+    background:
+      radial-gradient(1200px 500px at 70% -10%, rgba(8,145,178,0.10), transparent 60%),
+      linear-gradient(rgba(18,53,64,0.16) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(18,53,64,0.16) 1px, transparent 1px),
+      var(--bg);
+    background-size: auto, 44px 44px, 44px 44px, auto;
+  }
+  /* scanline film */
+  body::after {
+    content: "";
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,0.014) 0 1px, transparent 1px 3px);
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 10px 18px;
+    background: linear-gradient(180deg, rgba(13,21,29,0.96), rgba(8,13,18,0.96));
+    border-bottom: 1px solid var(--line-hot);
+    box-shadow: 0 0 24px rgba(8,145,178,0.18);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .brand { display: flex; flex-direction: column; line-height: 1.15; }
+  .brand .name {
+    font-size: 19px; font-weight: 700; letter-spacing: 3px; color: var(--cyan);
+    text-shadow: 0 0 12px rgba(103,232,249,0.45);
+  }
+  .brand .sub { font-size: 10px; letter-spacing: 2.5px; color: var(--muted); text-transform: uppercase; }
+  .hdr-spacer { flex: 1; }
+  .hdr-cell {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+    padding: 4px 14px; border-left: 1px solid var(--line);
+  }
+  .hdr-cell .k { font-size: 9px; letter-spacing: 2px; color: var(--muted); }
+  .hdr-cell .v { font-size: 14px; letter-spacing: 1px; }
+
+  .lamp { display: inline-flex; align-items: center; gap: 8px; }
+  .lamp .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--dim); box-shadow: none; flex: none;
+  }
+  .lamp.ok .dot   { background: var(--good);  box-shadow: 0 0 10px var(--good);  animation: pulse 2s ease-in-out infinite; }
+  .lamp.bad .dot  { background: var(--crit);  box-shadow: 0 0 10px var(--crit);  animation: pulse 0.8s ease-in-out infinite; }
+  .lamp.warn .dot { background: var(--warn);  box-shadow: 0 0 10px var(--warn); }
+  .lamp.ok   { color: var(--good-txt); }
+  .lamp.bad  { color: var(--crit-txt); }
+  .lamp.warn { color: var(--warn-txt); }
+  .lamp.off  { color: var(--dim); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+  /* ---------- layout grid ---------- */
+  main {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 12px;
+    padding: 12px 16px 24px;
+    max-width: 1900px;
+    margin: 0 auto;
+  }
+  .panel {
+    grid-column: span 12;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.4), inset 0 0 24px rgba(8,145,178,0.04);
+    display: flex; flex-direction: column;
+    min-width: 0;
+    position: relative;
+    transition: border-color 0.4s;
+  }
+  .panel:hover { border-color: var(--line-hot); }
+  .panel-hd {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11px; letter-spacing: 2.5px; color: var(--cyan);
+    text-transform: uppercase;
+  }
+  .panel-hd::before { content: "▮"; color: var(--cyan-mark); font-size: 9px; }
+  .panel-hd .meta { margin-left: auto; color: var(--muted); letter-spacing: 1px; font-size: 10px; text-transform: none; }
+  .panel-bd { padding: 10px 12px; flex: 1; min-height: 0; position: relative; }
+
+  @media (min-width: 900px) {
+    .p-cam    { grid-column: span 7; }
+    .p-nav    { grid-column: span 5; }
+    .p-drive  { grid-column: span 4; }
+    .p-slam   { grid-column: span 3; }
+    .p-health { grid-column: span 5; }
+    .p-log    { grid-column: span 12; }
+  }
+  @media (min-width: 1500px) {
+    .p-cam    { grid-column: span 6; }
+    .p-nav    { grid-column: span 6; }
+    .p-drive  { grid-column: span 3; }
+    .p-slam   { grid-column: span 3; }
+    .p-health { grid-column: span 6; }
+  }
+
+  /* NO SIGNAL veil */
+  .nosig {
+    position: absolute; inset: 0;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(3,5,7,0.72);
+    color: var(--dim); font-size: 15px; letter-spacing: 5px;
+    z-index: 5; border-radius: 0 0 6px 6px;
+    backdrop-filter: blur(1px);
+    pointer-events: none;   /* veil is visual only — controls stay usable */
+  }
+  .panel.stale .nosig { display: flex; }
+  .panel.stale .panel-hd { color: var(--muted); }
+  .nosig span { animation: pulse 2.4s ease-in-out infinite; }
+
+  /* ---------- camera ---------- */
+  .cam-wrap { position: relative; background: #000; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  #camCanvas { display: block; width: 100%; height: auto; }
+  .cam-hud {
+    position: absolute; left: 8px; top: 6px;
+    font-size: 10px; letter-spacing: 1.5px; color: var(--cyan);
+    text-shadow: 0 0 6px rgba(0,0,0,0.9); pointer-events: none;
+  }
+  .cam-hud .row2 { color: var(--muted); }
+  .cam-target {
+    position: absolute; right: 8px; top: 6px;
+    font-size: 10px; letter-spacing: 1.5px; color: var(--amber);
+    text-shadow: 0 0 6px rgba(0,0,0,0.9); pointer-events: none;
+    display: none;
+  }
+  .seg { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  .seg button, .btn {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 1.5px;
+    color: var(--muted); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 4px 12px; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .seg button:hover, .btn:hover { color: var(--ink); border-color: var(--line-hot); }
+  .seg button.on {
+    color: var(--cyan); border-color: var(--cyan-mark);
+    background: rgba(8,145,178,0.12);
+    box-shadow: 0 0 8px rgba(8,145,178,0.25);
+  }
+
+  /* ---------- nav ---------- */
+  .nav-tools { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
+  .nav-tools .btn { padding: 3px 10px; }
+  .nav-tools .btn.on { color: var(--cyan); border-color: var(--cyan-mark); }
+  .nav-legend { margin-left: auto; display: flex; gap: 14px; font-size: 10px; letter-spacing: 1px; }
+  .nav-legend .sw { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 5px; border-radius: 2px; }
+  #navCanvas { display: block; width: 100%; background: var(--bg-deep); border: 1px solid var(--line); border-radius: 4px; }
+  .nav-read { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 8px; font-size: 11px; }
+  .nav-read .cell { background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 5px 8px; }
+  .nav-read .k { font-size: 9px; letter-spacing: 1.5px; color: var(--muted); display: block; }
+  .nav-read .cyan  { color: var(--cyan); }
+  .nav-read .amber { color: var(--amber); }
+
+  /* ---------- drive ---------- */
+  .bar-row { display: grid; grid-template-columns: 42px 1fr 74px; gap: 8px; align-items: center; margin: 7px 0; }
+  .bar-row .k { font-size: 10px; letter-spacing: 1px; color: var(--muted); text-align: right; }
+  .bar-row .v { font-size: 12px; color: var(--ink); text-align: right; white-space: nowrap; }
+  .bar-track {
+    position: relative; height: 14px;
+    background: var(--bg-deep); border: 1px solid var(--line); border-radius: 3px;
+    overflow: hidden;
+  }
+  .bar-track::after { /* zero line */
+    content: ""; position: absolute; left: 50%; top: 0; bottom: 0;
+    width: 1px; background: var(--dim);
+  }
+  .bar-fill {
+    position: absolute; top: 2px; bottom: 2px; left: 50%;
+    width: 0; background: var(--cyan-mark); border-radius: 2px;
+    transition: width 0.12s linear, left 0.12s linear;
+  }
+  .drive-sec { font-size: 9px; letter-spacing: 2px; color: var(--muted); margin: 12px 0 2px; border-bottom: 1px dashed var(--line); padding-bottom: 3px; }
+  .drive-sec:first-child { margin-top: 0; }
+
+  .batt-wrap { margin-top: 8px; }
+  .batt-big { display: flex; align-items: baseline; gap: 10px; }
+  .batt-big .volts { font-size: 30px; font-weight: 700; letter-spacing: 1px; }
+  .batt-big .state { font-size: 11px; letter-spacing: 2px; }
+  .batt-track {
+    position: relative; height: 18px; margin-top: 6px;
+    background: var(--bg-deep); border: 1px solid var(--line); border-radius: 3px;
+  }
+  .batt-fill { position: absolute; left: 2px; top: 2px; bottom: 2px; width: 0; border-radius: 2px; transition: width 0.4s, background 0.4s; }
+  .batt-ticks { position: relative; height: 12px; margin-top: 2px; font-size: 8px; color: var(--dim); }
+  .batt-ticks span { position: absolute; transform: translateX(-50%); }
+  .batt-good { color: var(--good-txt); } .batt-warn { color: var(--warn-txt); } .batt-crit { color: var(--crit-txt); }
+  .batt-nosig .volts { color: var(--dim); }
+
+  /* ---------- vslam ---------- */
+  .slam-lamp {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 12px 0 8px;
+  }
+  .slam-lamp .ring {
+    width: 74px; height: 74px; border-radius: 50%;
+    border: 2px solid var(--dim);
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.4s;
+  }
+  .slam-lamp .core { width: 40px; height: 40px; border-radius: 50%; background: var(--dim); transition: all 0.4s; }
+  .slam-lamp.ok  .ring { border-color: var(--good);  box-shadow: 0 0 22px rgba(5,150,105,0.45), inset 0 0 14px rgba(5,150,105,0.25); }
+  .slam-lamp.ok  .core { background: var(--good);  box-shadow: 0 0 18px var(--good); animation: pulse 2s ease-in-out infinite; }
+  .slam-lamp.bad .ring { border-color: var(--crit); box-shadow: 0 0 22px rgba(239,68,68,0.5), inset 0 0 14px rgba(239,68,68,0.3); }
+  .slam-lamp.bad .core { background: var(--crit); box-shadow: 0 0 18px var(--crit); animation: pulse 0.7s ease-in-out infinite; }
+  .slam-lamp .txt { font-size: 15px; letter-spacing: 4px; color: var(--dim); }
+  .slam-lamp.ok .txt  { color: var(--good-txt); }
+  .slam-lamp.bad .txt { color: var(--crit-txt); }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; font-size: 11px; margin-top: 8px; }
+  .kv .k { color: var(--muted); letter-spacing: 1px; }
+  .kv .v { color: var(--ink); text-align: right; }
+
+  /* ---------- health matrix ---------- */
+  .health-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+    gap: 8px;
+  }
+  .hcell {
+    background: var(--panel); border: 1px solid var(--line); border-left-width: 3px;
+    border-radius: 3px; padding: 7px 9px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .hcell .t { font-size: 10px; letter-spacing: 1.2px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hcell .hz { font-size: 17px; font-weight: 700; letter-spacing: 1px; }
+  .hcell .st { font-size: 9px; letter-spacing: 2px; }
+  .hcell.ok   { border-left-color: var(--good); }  .hcell.ok .hz { color: var(--good-txt); }  .hcell.ok .st { color: var(--good-txt); }
+  .hcell.warn { border-left-color: var(--warn); }  .hcell.warn .hz { color: var(--warn-txt); } .hcell.warn .st { color: var(--warn-txt); }
+  .hcell.bad  { border-left-color: var(--crit); }  .hcell.bad .hz { color: var(--crit-txt); }  .hcell.bad .st { color: var(--crit-txt); }
+  .hcell.idle { border-left-color: var(--dim); }   .hcell.idle .hz { color: var(--dim); }      .hcell.idle .st { color: var(--dim); }
+
+  /* ---------- log ---------- */
+  .log-tools { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .log-tools .btn.on { color: var(--cyan); border-color: var(--cyan-mark); background: rgba(8,145,178,0.10); }
+  .log-tools .spacer { flex: 1; }
+  .log-view {
+    height: 240px; overflow-y: auto;
+    background: var(--bg-deep); border: 1px solid var(--line); border-radius: 4px;
+    padding: 6px 8px; font-size: 11px; line-height: 1.5;
+  }
+  .log-view::-webkit-scrollbar { width: 8px; }
+  .log-view::-webkit-scrollbar-thumb { background: var(--line-hot); border-radius: 4px; }
+  .lrow { display: flex; gap: 8px; white-space: pre-wrap; word-break: break-word; }
+  .lrow .lt { color: var(--dim); flex: none; }
+  .lrow .lsev { flex: none; width: 46px; letter-spacing: 1px; }
+  .lrow .lnode { color: var(--muted); flex: none; max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow .lmsg { color: var(--ink); }
+  .lrow.sev10 .lsev { color: var(--dim); }
+  .lrow.sev20 .lsev { color: var(--cyan); }
+  .lrow.sev30 .lsev { color: var(--warn-txt); }
+  .lrow.sev40 .lsev { color: var(--crit-txt); }
+  .lrow.sev50 .lsev { color: var(--crit-txt); font-weight: 700; }
+  .lrow.sev40 .lmsg, .lrow.sev50 .lmsg { color: var(--crit-txt); }
+  .lrow.sev30 .lmsg { color: var(--warn-txt); }
+
+  footer {
+    text-align: center; color: var(--dim); font-size: 10px; letter-spacing: 2px;
+    padding: 4px 0 14px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="name">SUDS</span>
+    <span class="sub">domestic autonomy platform // mission control</span>
+  </div>
+  <div class="hdr-spacer"></div>
+  <div class="hdr-cell">
+    <span class="k">UPLINK</span>
+    <span class="v lamp off" id="hdrLink"><span class="dot"></span><span id="hdrLinkTxt">CONNECTING</span></span>
+  </div>
+  <div class="hdr-cell">
+    <span class="k">VSLAM</span>
+    <span class="v lamp off" id="hdrSlam"><span class="dot"></span><span id="hdrSlamTxt">NO SIGNAL</span></span>
+  </div>
+  <div class="hdr-cell">
+    <span class="k">BATTERY</span>
+    <span class="v" id="hdrBatt" style="color:var(--dim)">-- V</span>
+  </div>
+  <div class="hdr-cell">
+    <span class="k">SESSION</span>
+    <span class="v" id="hdrUptime" style="color:var(--cyan)">00:00:00</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- CAMERA -->
+  <section class="panel p-cam" id="panelCam">
+    <div class="panel-hd">Optical Feed<span class="meta" id="camMeta">--</span></div>
+    <div class="panel-bd">
+      <div class="seg" id="camSeg">
+        <button data-stream="color" class="on">COLOR</button>
+        <button data-stream="infra">INFRA-1</button>
+        <button data-stream="depth">DEPTH</button>
+      </div>
+      <div class="cam-wrap">
+        <canvas id="camCanvas" width="640" height="480"></canvas>
+        <div class="cam-hud" id="camHud">
+          <div id="camHudTopic">/camera/color/image_raw/compressed</div>
+          <div class="row2" id="camHudStats">awaiting frames</div>
+        </div>
+        <div class="cam-target" id="camTarget">◈ TARGET LOCK</div>
+      </div>
+      <div class="nosig"><span>NO SIGNAL</span></div>
+    </div>
+  </section>
+
+  <!-- NAV -->
+  <section class="panel p-nav" id="panelNav">
+    <div class="panel-hd">Nav Plot // Top-Down<span class="meta" id="navMeta">--</span></div>
+    <div class="panel-bd">
+      <div class="nav-tools">
+        <button class="btn" id="navZoomIn">＋</button>
+        <button class="btn" id="navZoomOut">－</button>
+        <button class="btn on" id="navFollow">FOLLOW</button>
+        <button class="btn" id="navClear">CLEAR</button>
+        <div class="nav-legend">
+          <span style="color:var(--cyan)"><span class="sw" style="background:var(--cyan-mark)"></span>VSLAM</span>
+          <span style="color:var(--amber)"><span class="sw" style="background:var(--amber-mark)"></span>ENCODER</span>
+        </div>
+      </div>
+      <canvas id="navCanvas" width="600" height="420"></canvas>
+      <div class="nav-read">
+        <div class="cell"><span class="k">VSLAM POSE</span><span class="cyan" id="navVslamRead">--</span></div>
+        <div class="cell"><span class="k">ENCODER POSE</span><span class="amber" id="navEncRead">--</span></div>
+        <div class="cell"><span class="k">DIVERGENCE</span><span id="navDivRead">--</span></div>
+      </div>
+      <div class="nosig"><span>NO SIGNAL</span></div>
+    </div>
+  </section>
+
+  <!-- DRIVE -->
+  <section class="panel p-drive" id="panelDrive">
+    <div class="panel-hd">Drive Telemetry<span class="meta" id="driveMeta">--</span></div>
+    <div class="panel-bd">
+      <div class="drive-sec">CMD_VEL — COMMANDED</div>
+      <div class="bar-row"><span class="k">VX</span><div class="bar-track"><div class="bar-fill" id="barVx"></div></div><span class="v" id="valVx">--</span></div>
+      <div class="bar-row"><span class="k">VY</span><div class="bar-track"><div class="bar-fill" id="barVy"></div></div><span class="v" id="valVy">--</span></div>
+      <div class="bar-row"><span class="k">WZ</span><div class="bar-track"><div class="bar-fill" id="barWz"></div></div><span class="v" id="valWz">--</span></div>
+      <div class="drive-sec">WHEEL_ODOM — MEASURED</div>
+      <div class="bar-row"><span class="k">VX</span><div class="bar-track"><div class="bar-fill" id="barOVx" style="background:var(--amber-mark)"></div></div><span class="v" id="valOVx">--</span></div>
+      <div class="bar-row"><span class="k">WZ</span><div class="bar-track"><div class="bar-fill" id="barOWz" style="background:var(--amber-mark)"></div></div><span class="v" id="valOWz">--</span></div>
+      <div class="drive-sec">POWER BUS — 2S LiPo</div>
+      <div class="batt-wrap batt-nosig" id="battWrap">
+        <div class="batt-big">
+          <span class="volts" id="battVolts">-- V</span>
+          <span class="state" id="battState" style="color:var(--dim)">NO SIGNAL</span>
+        </div>
+        <div class="batt-track"><div class="batt-fill" id="battFill"></div></div>
+        <div class="batt-ticks">
+          <span style="left:0%">6.6</span><span style="left:22%">7.0</span>
+          <span style="left:44%">7.4</span><span style="left:100%">8.4</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- VSLAM -->
+  <section class="panel p-slam" id="panelSlam">
+    <div class="panel-hd">VSLAM Core</div>
+    <div class="panel-bd">
+      <div class="slam-lamp" id="slamLamp">
+        <div class="ring"><div class="core"></div></div>
+        <div class="txt" id="slamLampTxt">NO SIGNAL</div>
+      </div>
+      <div class="kv">
+        <span class="k">ODOM RATE</span><span class="v" id="slamHz">--</span>
+        <span class="k">TRACK EXEC</span><span class="v" id="slamExec">--</span>
+        <span class="k">EXEC MEAN</span><span class="v" id="slamExecMean">--</span>
+        <span class="k">VO STATE</span><span class="v" id="slamVoState">--</span>
+      </div>
+      <div class="nosig"><span>NO SIGNAL</span></div>
+    </div>
+  </section>
+
+  <!-- HEALTH -->
+  <section class="panel p-health" id="panelHealth">
+    <div class="panel-hd">Topic Health Matrix<span class="meta">2s window</span></div>
+    <div class="panel-bd">
+      <div class="health-grid" id="healthGrid"></div>
+    </div>
+  </section>
+
+  <!-- LOG -->
+  <section class="panel p-log" id="panelLog">
+    <div class="panel-hd">Event Log // /rosout<span class="meta" id="logMeta">0 rows</span></div>
+    <div class="panel-bd">
+      <div class="log-tools">
+        <button class="btn" data-sev="10">DEBUG</button>
+        <button class="btn" data-sev="20">INFO</button>
+        <button class="btn on" data-sev="30">WARN</button>
+        <button class="btn on" data-sev="40">ERROR</button>
+        <button class="btn on" data-sev="50">FATAL</button>
+        <button class="btn on" id="logTrace" title="always show motor_controller + behavior_manager">TRACE MOTOR/BEHAVIOR</button>
+        <div class="spacer"></div>
+        <button class="btn on" id="logScroll">AUTO-SCROLL</button>
+        <button class="btn" id="logClear">CLEAR</button>
+      </div>
+      <div class="log-view" id="logView"></div>
+    </div>
+  </section>
+
+</main>
+
+<footer>SUDS MISSION CONTROL // rosbridge <span id="ftUrl"></span></footer>
+
+<script src="roslib.min.js"></script>
+<script>
+'use strict';
+
+/* ============================================================
+ * SUDS mission control — LAN operator console
+ * Connects to rosbridge at ws://<page-host>:9090 (never localhost-hardcoded).
+ * ============================================================ */
+
+const HOST   = window.location.hostname || 'localhost';
+const WS_URL = 'ws://' + HOST + ':9090';
+document.getElementById('ftUrl').textContent = WS_URL;
+
+const now = () => performance.now();
+const $   = (id) => document.getElementById(id);
+
+/* ---------- utilities ---------- */
+
+function yawFromQuat(q) {
+  if (!q) return 0;
+  return Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+}
+
+function fmt(v, d) { return (v == null || isNaN(v)) ? '--' : v.toFixed(d == null ? 2 : d); }
+
+function b64ToBytes(data) {
+  if (data instanceof Uint8Array) return data;
+  if (Array.isArray(data)) return new Uint8Array(data);
+  if (typeof data === 'string') {
+    const bin = atob(data);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  return null;
+}
+
+/* Rate meter: counts messages, reports Hz over a 2 s window. */
+class RateMeter {
+  constructor() { this.count = 0; this.hz = 0; this.lastMsg = 0; this.total = 0; }
+  tick() { this.count++; this.total++; this.lastMsg = now(); }
+  roll(windowMs) { this.hz = this.count * 1000 / windowMs; this.count = 0; }
+  ageMs() { return this.lastMsg ? now() - this.lastMsg : Infinity; }
+}
+
+/* ============================================================
+ * Connection manager with auto-reconnect
+ * ============================================================ */
+
+let ros = null;
+let connected = false;
+let reconnectTimer = null;
+let reconnectDelay = 1000;
+let sessionStart = null;          // first successful connect
+const topicRegistry = [];          // { name, type, throttle, compression, handler, _sub }
+
+function registerTopic(spec) { topicRegistry.push(spec); return spec; }
+
+function subscribeAll() {
+  for (const spec of topicRegistry) {
+    const opts = { ros: ros, name: spec.name, messageType: spec.type };
+    if (spec.throttle)    opts.throttle_rate = spec.throttle;
+    if (spec.compression) opts.compression   = spec.compression;
+    if (spec.queue)       opts.queue_length  = spec.queue;
+    spec._sub = new ROSLIB.Topic(opts);
+    spec._sub.subscribe(spec.handler);
+  }
+}
+
+function teardownAll() {
+  for (const spec of topicRegistry) {
+    if (spec._sub) { try { spec._sub.unsubscribe(); } catch (e) {} spec._sub = null; }
+  }
+}
+
+function setLink(state, txt) {
+  const el = $('hdrLink');
+  el.className = 'v lamp ' + state;
+  $('hdrLinkTxt').textContent = txt;
+}
+
+function connect() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  setLink('warn', 'CONNECTING');
+  try { if (ros) ros.close(); } catch (e) {}
+
+  ros = new ROSLIB.Ros({ url: WS_URL });
+
+  ros.on('connection', () => {
+    connected = true;
+    reconnectDelay = 1000;
+    if (!sessionStart) sessionStart = now();
+    setLink('ok', 'ONLINE');
+    logSystem('uplink established → ' + WS_URL);
+    subscribeAll();
+  });
+
+  ros.on('close', () => {
+    if (connected) logSystem('uplink LOST — retrying');
+    connected = false;
+    teardownAll();
+    setLink('bad', 'OFFLINE');
+    scheduleReconnect();
+  });
+
+  ros.on('error', () => { /* close always follows; avoid double-scheduling */ });
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    reconnectDelay = Math.min(reconnectDelay * 1.6, 5000);
+    connect();
+  }, reconnectDelay);
+}
+
+/* ============================================================
+ * PANEL 1 — camera + detection overlay
+ * ============================================================ */
+
+const camCanvas = $('camCanvas');
+const camCtx = camCanvas.getContext('2d');
+
+const STREAMS = {
+  color: { topic: '/camera/color/image_raw/compressed',                label: 'COLOR' },
+  infra: { topic: '/camera/infra1/image_rect_raw/compressed',          label: 'INFRA-1' },
+  depth: { topic: '/camera/aligned_depth_to_color/image_raw/compressed', label: 'DEPTH (jpeg render)' },
+};
+let activeStream = 'color';
+
+let camFrame = null;          // decoded Image for the ACTIVE stream
+let camFrameTs = 0;
+let camDecodeBusy = false;
+const camMeter = new RateMeter();
+
+let lastYolo = [];            // Detection2DArray.detections
+let lastYoloTs = 0;
+let lastClothes = null;       // Detection2D
+let lastClothesTs = 0;
+const yoloMeter = new RateMeter();
+
+function camStreamSpecHandler(streamKey) {
+  return (msg) => {
+    if (streamKey !== activeStream) return;      // stale sub during switch
+    camMeter.tick();
+    if (camDecodeBusy) return;                    // drop frame if still decoding
+    camDecodeBusy = true;
+    const img = new Image();
+    img.onload = () => { camFrame = img; camFrameTs = now(); camDecodeBusy = false; };
+    img.onerror = () => { camDecodeBusy = false; };
+    // format strings seen live: "rgb8; jpeg compressed bgr8", "mono8; jpeg ...",
+    // "16UC1; jpeg compressed mono8" — all jpeg-decodable in-browser.
+    img.src = 'data:image/jpeg;base64,' + msg.data;
+  };
+}
+
+let camSpec = registerTopic({
+  name: STREAMS.color.topic, type: 'sensor_msgs/CompressedImage',
+  throttle: 150, handler: camStreamSpecHandler('color'),
+});
+
+function switchStream(key) {
+  if (!STREAMS[key]) return;
+  activeStream = key;
+  camFrame = null; camFrameTs = 0;
+  document.querySelectorAll('#camSeg button').forEach(b =>
+    b.classList.toggle('on', b.dataset.stream === key));
+  $('camHudTopic').textContent = STREAMS[key].topic;
+  // rewire the single camera subscription
+  if (camSpec._sub) { try { camSpec._sub.unsubscribe(); } catch (e) {} camSpec._sub = null; }
+  camSpec.name = STREAMS[key].topic;
+  camSpec.handler = camStreamSpecHandler(key);
+  if (connected) {
+    camSpec._sub = new ROSLIB.Topic({
+      ros: ros, name: camSpec.name, messageType: camSpec.type, throttle_rate: camSpec.throttle,
+    });
+    camSpec._sub.subscribe(camSpec.handler);
+  }
+}
+document.querySelectorAll('#camSeg button').forEach(b =>
+  b.addEventListener('click', () => switchStream(b.dataset.stream)));
+
+registerTopic({
+  name: '/yolo/detections', type: 'vision_msgs/Detection2DArray',
+  handler: (msg) => {
+    yoloMeter.tick();
+    lastYolo = Array.isArray(msg.detections) ? msg.detections : [];
+    lastYoloTs = now();
+  },
+});
+
+registerTopic({
+  name: '/clothes/detected', type: 'vision_msgs/Detection2D',   // verified: Detection2D (single best)
+  handler: (msg) => { lastClothes = msg; lastClothesTs = now(); },
+});
+
+/* Single-class custom models (clothes2/socks2) report class_id "0" → CLOTHES.
+ * The generic yolov8s COCO model reports numeric ids → COCO names. */
+const COCO = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee','skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'];
+let seenNonZeroClass = false;
+function classLabel(cls) {
+  if (cls === '') return '';
+  const n = Number(cls);
+  if (!isNaN(n)) {
+    if (n !== 0) seenNonZeroClass = true;
+    if (n === 0 && !seenNonZeroClass) return 'CLOTHES';   // single-class model
+    return (COCO[n] || cls).toUpperCase();
+  }
+  return cls.toUpperCase();
+}
+
+/* Isaac ROS yolov8 decoder emits bbox coords in 640x640 letterboxed network
+ * space; camera runs 640x480 → unpad y by (640-480*scale)/2. Handles
+ * normalized (<=1.0) and native-image coords too. */
+function detToImageSpace(bbox, imgW, imgH) {
+  if (!bbox || !bbox.center) return null;
+  const pos = bbox.center.position || bbox.center;
+  let cx = pos.x, cy = pos.y, sx = bbox.size_x, sy = bbox.size_y;
+  if (typeof cx !== 'number' || typeof cy !== 'number') return null;
+  if (cx <= 1.0 && cy <= 1.0) {
+    cx *= imgW; cy *= imgH; sx *= imgW; sy *= imgH;
+  } else if (imgW !== 640 || imgH !== 640) {
+    const NET = 640;
+    const scale = Math.min(NET / imgW, NET / imgH);
+    const padX = (NET - imgW * scale) / 2, padY = (NET - imgH * scale) / 2;
+    if (cx <= NET && cy <= NET) {
+      cx = (cx - padX) / scale; cy = (cy - padY) / scale;
+      sx = sx / scale; sy = sy / scale;
+    }
+  }
+  return { cx, cy, sx, sy };
+}
+
+function drawDetBox(det, color, label, glow) {
+  const m = detToImageSpace(det.bbox, camCanvas.width, camCanvas.height);
+  if (!m) return;
+  const x = m.cx - m.sx / 2, y = m.cy - m.sy / 2;
+  camCtx.save();
+  camCtx.strokeStyle = color;
+  camCtx.lineWidth = 2;
+  if (glow) { camCtx.shadowColor = color; camCtx.shadowBlur = 10; }
+  camCtx.strokeRect(x, y, m.sx, m.sy);
+  // corner ticks
+  const t = Math.min(12, m.sx / 4);
+  camCtx.lineWidth = 3.5;
+  camCtx.beginPath();
+  camCtx.moveTo(x, y + t); camCtx.lineTo(x, y); camCtx.lineTo(x + t, y);
+  camCtx.moveTo(x + m.sx - t, y); camCtx.lineTo(x + m.sx, y); camCtx.lineTo(x + m.sx, y + t);
+  camCtx.moveTo(x, y + m.sy - t); camCtx.lineTo(x, y + m.sy); camCtx.lineTo(x + t, y + m.sy);
+  camCtx.moveTo(x + m.sx - t, y + m.sy); camCtx.lineTo(x + m.sx, y + m.sy); camCtx.lineTo(x + m.sx, y + m.sy - t);
+  camCtx.stroke();
+  camCtx.restore();
+  if (label) {
+    camCtx.save();
+    camCtx.font = '600 13px ' + getComputedStyle(document.body).fontFamily;
+    const w = camCtx.measureText(label).width + 10;
+    const ly = Math.max(16, y - 4);
+    camCtx.fillStyle = 'rgba(3,5,7,0.75)';
+    camCtx.fillRect(x, ly - 13, w, 17);
+    camCtx.fillStyle = color;
+    camCtx.fillText(label, x + 5, ly);
+    camCtx.restore();
+  }
+}
+
+function renderCam() {
+  const W = camCanvas.width, H = camCanvas.height;
+  if (camFrame) {
+    if (W !== camFrame.width || H !== camFrame.height) {
+      camCanvas.width = camFrame.width; camCanvas.height = camFrame.height;
+    }
+    camCtx.drawImage(camFrame, 0, 0);
+  } else {
+    camCtx.fillStyle = '#000'; camCtx.fillRect(0, 0, W, H);
+  }
+
+  if (camFrame && activeStream === 'color') {
+    const yoloFresh = (now() - lastYoloTs) < 1500;
+    if (yoloFresh) {
+      for (const det of lastYolo) {
+        const hyp = det.results && det.results[0] && det.results[0].hypothesis;
+        const score = hyp ? hyp.score : null;
+        const cls = hyp && hyp.class_id != null ? String(hyp.class_id) : '';
+        const label = classLabel(cls) +
+                      (score != null ? ' ' + (score * 100).toFixed(0) + '%' : '');
+        drawDetBox(det, '#22d3ee', label, false);
+      }
+    }
+    const lockFresh = (now() - lastClothesTs) < 2000 && lastClothes;
+    if (lockFresh) drawDetBox(lastClothes, '#fbbf24', 'TARGET', true);
+    $('camTarget').style.display = lockFresh ? 'block' : 'none';
+  } else {
+    $('camTarget').style.display = 'none';
+  }
+  requestAnimationFrame(renderCam);
+}
+
+/* ============================================================
+ * PANEL 2 — top-down nav canvas (VSLAM vs ENCODER)
+ * ============================================================ */
+
+const navCanvas = $('navCanvas');
+const navCtx = navCanvas.getContext('2d');
+const TRAIL_MAX = 3000;
+const TRAIL_MIN_STEP = 0.01; // m
+
+const navState = {
+  ppm: 80,            // pixels per meter
+  follow: true,
+  center: { x: 0, y: 0 },
+  vslam: { trail: [], pose: null, ts: 0, meter: new RateMeter() },
+  enc:   { trail: [], pose: null, ts: 0, meter: new RateMeter() },
+};
+
+function odomHandler(src) {
+  return (msg) => {
+    const s = navState[src];
+    s.meter.tick();
+    const p = msg.pose.pose.position;
+    const yaw = yawFromQuat(msg.pose.pose.orientation);
+    const tw = msg.twist && msg.twist.twist;
+    s.pose = { x: p.x, y: p.y, yaw: yaw,
+               vx: tw ? tw.linear.x : 0, wz: tw ? tw.angular.z : 0 };
+    s.ts = now();
+    const t = s.trail, last = t[t.length - 1];
+    if (!last || Math.hypot(p.x - last[0], p.y - last[1]) > TRAIL_MIN_STEP) {
+      t.push([p.x, p.y]);
+      if (t.length > TRAIL_MAX) t.splice(0, t.length - TRAIL_MAX);
+    }
+  };
+}
+
+registerTopic({ name: '/visual_slam/tracking/odometry', type: 'nav_msgs/Odometry', handler: odomHandler('vslam') });
+registerTopic({ name: '/wheel_odom',                    type: 'nav_msgs/Odometry', handler: odomHandler('enc') });
+
+$('navZoomIn').addEventListener('click', () => { navState.ppm = Math.min(navState.ppm * 1.4, 800); });
+$('navZoomOut').addEventListener('click', () => { navState.ppm = Math.max(navState.ppm / 1.4, 8); });
+$('navFollow').addEventListener('click', (e) => {
+  navState.follow = !navState.follow;
+  e.currentTarget.classList.toggle('on', navState.follow);
+});
+$('navClear').addEventListener('click', () => {
+  navState.vslam.trail.length = 0;
+  navState.enc.trail.length = 0;
+});
+
+function navProject(x, y, W, H) {
+  // ROS: x forward, y left → screen: forward = up, left = left
+  return [ W / 2 - (y - navState.center.y) * navState.ppm,
+           H / 2 - (x - navState.center.x) * navState.ppm ];
+}
+
+function drawTrail(trail, color, W, H) {
+  if (trail.length < 2) return;
+  navCtx.strokeStyle = color;
+  navCtx.lineWidth = 2;
+  navCtx.beginPath();
+  const p0 = navProject(trail[0][0], trail[0][1], W, H);
+  navCtx.moveTo(p0[0], p0[1]);
+  for (let i = 1; i < trail.length; i++) {
+    const p = navProject(trail[i][0], trail[i][1], W, H);
+    navCtx.lineTo(p[0], p[1]);
+  }
+  navCtx.stroke();
+}
+
+function drawRobotMarker(pose, mark, txt, label, W, H) {
+  const [sx, sy] = navProject(pose.x, pose.y, W, H);
+  // screen heading: world (cosθ, sinθ) maps to screen (-sinθ, -cosθ);
+  // canvas-rotating the up-drawn arrow by -θ produces exactly that vector.
+  const a = -pose.yaw;
+  navCtx.save();
+  navCtx.translate(sx, sy);
+  navCtx.rotate(a);
+  navCtx.fillStyle = mark;
+  navCtx.shadowColor = mark; navCtx.shadowBlur = 8;
+  navCtx.beginPath();                   // heading arrow
+  navCtx.moveTo(0, -11); navCtx.lineTo(7, 8); navCtx.lineTo(0, 4); navCtx.lineTo(-7, 8);
+  navCtx.closePath(); navCtx.fill();
+  navCtx.restore();
+  navCtx.save();
+  navCtx.font = '10px ' + getComputedStyle(document.body).fontFamily;
+  navCtx.fillStyle = txt;
+  navCtx.fillText(label, sx + 10, sy - 8);
+  navCtx.restore();
+}
+
+function renderNav() {
+  const cssW = navCanvas.clientWidth || 600;
+  const cssH = Math.max(300, Math.round(cssW * 0.66));
+  const dpr = window.devicePixelRatio || 1;
+  if (navCanvas.width !== Math.round(cssW * dpr) || navCanvas.height !== Math.round(cssH * dpr)) {
+    navCanvas.width = Math.round(cssW * dpr);
+    navCanvas.height = Math.round(cssH * dpr);
+    navCanvas.style.height = cssH + 'px';
+  }
+  navCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = cssW, H = cssH;
+
+  if (navState.follow && navState.vslam.pose) {
+    navState.center = { x: navState.vslam.pose.x, y: navState.vslam.pose.y };
+  } else if (navState.follow && navState.enc.pose) {
+    navState.center = { x: navState.enc.pose.x, y: navState.enc.pose.y };
+  }
+
+  navCtx.fillStyle = '#030507';
+  navCtx.fillRect(0, 0, W, H);
+
+  // metric grid: pick step so lines are 40–140 px apart
+  let step = 1;
+  const candidates = [0.1, 0.25, 0.5, 1, 2, 5, 10];
+  for (const c of candidates) { if (c * navState.ppm >= 40) { step = c; break; } }
+  navCtx.strokeStyle = 'rgba(18,53,64,0.6)';
+  navCtx.fillStyle = '#33454f';
+  navCtx.lineWidth = 1;
+  navCtx.font = '9px ' + getComputedStyle(document.body).fontFamily;
+  const mX0 = navState.center.y - (W / 2) / navState.ppm;   // note axis swap
+  const mX1 = navState.center.y + (W / 2) / navState.ppm;
+  const mY0 = navState.center.x - (H / 2) / navState.ppm;
+  const mY1 = navState.center.x + (H / 2) / navState.ppm;
+  for (let gy = Math.ceil(mX0 / step) * step; gy <= mX1; gy += step) {
+    const px = W / 2 - (gy - navState.center.y) * navState.ppm;
+    navCtx.beginPath(); navCtx.moveTo(px, 0); navCtx.lineTo(px, H); navCtx.stroke();
+    navCtx.fillText(gy.toFixed(step < 1 ? 2 : 0), px + 2, H - 4);
+  }
+  for (let gx = Math.ceil(mY0 / step) * step; gx <= mY1; gx += step) {
+    const py = H / 2 - (gx - navState.center.x) * navState.ppm;
+    navCtx.beginPath(); navCtx.moveTo(0, py); navCtx.lineTo(W, py); navCtx.stroke();
+    navCtx.fillText(gx.toFixed(step < 1 ? 2 : 0), 3, py - 3);
+  }
+  // scale chip
+  navCtx.fillStyle = '#5b7683';
+  navCtx.fillText('grid ' + (step < 1 ? step.toFixed(2) : step) + ' m', W - 70, 14);
+
+  drawTrail(navState.vslam.trail, '#0891b2', W, H);
+  drawTrail(navState.enc.trail,   '#d97706', W, H);
+  if (navState.enc.pose)   drawRobotMarker(navState.enc.pose,   '#d97706', '#fcd34d', 'ENC',   W, H);
+  if (navState.vslam.pose) drawRobotMarker(navState.vslam.pose, '#0891b2', '#67e8f9', 'VSLAM', W, H);
+
+  // readouts
+  const vp = navState.vslam.pose, ep = navState.enc.pose;
+  $('navVslamRead').textContent = vp
+    ? fmt(vp.x) + ', ' + fmt(vp.y) + ' m  θ' + fmt(vp.yaw * 180 / Math.PI, 0) + '°' : '--';
+  $('navEncRead').textContent = ep
+    ? fmt(ep.x) + ', ' + fmt(ep.y) + ' m  θ' + fmt(ep.yaw * 180 / Math.PI, 0) + '°' : '--';
+  $('navDivRead').textContent = (vp && ep)
+    ? fmt(Math.hypot(vp.x - ep.x, vp.y - ep.y), 3) + ' m' : '--';
+
+  requestAnimationFrame(renderNav);
+}
+
+/* ============================================================
+ * PANEL 3 — drive telemetry + battery
+ * ============================================================ */
+
+const cmdMeter = new RateMeter();
+let lastCmd = null, lastCmdTs = 0;
+let lastBatt = null, lastBattTs = 0;
+const battMeter = new RateMeter();
+
+registerTopic({
+  name: '/cmd_vel', type: 'geometry_msgs/Twist',
+  handler: (msg) => { cmdMeter.tick(); lastCmd = msg; lastCmdTs = now(); },
+});
+
+registerTopic({
+  name: '/battery_voltage', type: 'std_msgs/Float32',
+  handler: (msg) => { battMeter.tick(); lastBatt = msg.data; lastBattTs = now(); },
+});
+
+function setBar(fillId, valId, value, range, unit) {
+  const fill = $(fillId);
+  const frac = Math.max(-1, Math.min(1, (value || 0) / range));
+  const halfPct = Math.abs(frac) * 50;
+  if (frac >= 0) { fill.style.left = '50%'; fill.style.width = halfPct + '%'; }
+  else { fill.style.left = (50 - halfPct) + '%'; fill.style.width = halfPct + '%'; }
+  $(valId).textContent = value == null ? '--' : fmt(value) + ' ' + unit;
+}
+
+const BATT = { crit: 6.6, warn: 7.0, nominal: 7.4, full: 8.4 };
+
+function renderDrive() {
+  const cmdFresh = (now() - lastCmdTs) < 3000 && lastCmd;
+  const c = cmdFresh ? lastCmd : { linear: { x: null, y: null }, angular: { z: null } };
+  setBar('barVx', 'valVx', c.linear.x,  0.5, 'm/s');
+  setBar('barVy', 'valVy', c.linear.y,  0.5, 'm/s');
+  setBar('barWz', 'valWz', c.angular.z, 1.0, 'r/s');
+
+  const ep = navState.enc.pose;
+  const encFresh = (now() - navState.enc.ts) < 3000 && ep;
+  setBar('barOVx', 'valOVx', encFresh ? ep.vx : null, 0.5, 'm/s');
+  setBar('barOWz', 'valOWz', encFresh ? ep.wz : null, 1.0, 'r/s');
+
+  $('driveMeta').textContent = cmdFresh
+    ? '/cmd_vel ' + fmt(cmdMeter.hz, 1) + ' Hz' : '/cmd_vel idle';
+
+  // battery
+  const battFresh = (now() - lastBattTs) < 5000 && lastBatt != null;
+  const wrap = $('battWrap'), fill = $('battFill');
+  if (battFresh) {
+    wrap.classList.remove('batt-nosig');
+    const v = lastBatt;
+    const frac = Math.max(0, Math.min(1, (v - BATT.crit) / (BATT.full - BATT.crit)));
+    fill.style.width = (frac * 100) + '%';
+    let cls, txt, color;
+    if (v < BATT.crit)      { cls = 'batt-crit'; txt = 'CRITICAL'; color = 'var(--crit)'; }
+    else if (v < BATT.warn) { cls = 'batt-warn'; txt = 'LOW';      color = 'var(--warn)'; }
+    else if (v < BATT.nominal) { cls = 'batt-good'; txt = 'NOMINAL'; color = 'var(--good)'; }
+    else                    { cls = 'batt-good'; txt = 'FULL';     color = 'var(--good)'; }
+    fill.style.background = color;
+    $('battVolts').textContent = v.toFixed(2) + ' V';
+    $('battVolts').className = 'volts ' + cls;
+    $('battState').textContent = txt;
+    $('battState').className = 'state ' + cls;
+    $('battState').style.color = '';
+    $('hdrBatt').textContent = v.toFixed(2) + ' V';
+    $('hdrBatt').className = 'v ' + cls;
+    $('hdrBatt').style.color = '';
+  } else {
+    wrap.classList.add('batt-nosig');
+    fill.style.width = '0';
+    $('battVolts').textContent = '-- V';
+    $('battVolts').className = 'volts';
+    $('battState').textContent = 'NO SIGNAL';
+    $('battState').style.color = 'var(--dim)';
+    $('hdrBatt').textContent = '-- V';
+    $('hdrBatt').className = 'v';
+    $('hdrBatt').style.color = 'var(--dim)';
+  }
+}
+
+/* ============================================================
+ * PANEL 4 — VSLAM status
+ * ============================================================ */
+
+let slamStatus = null, slamStatusTs = 0;
+const slamStatusMeter = new RateMeter();
+
+registerTopic({
+  name: '/visual_slam/status', type: 'isaac_ros_visual_slam_interfaces/VisualSlamStatus',
+  handler: (msg) => { slamStatusMeter.tick(); slamStatus = msg; slamStatusTs = now(); },
+});
+
+const VO_STATES = { 0: 'UNKNOWN', 1: 'TRACKING', 2: 'LOST' };
+
+function renderSlam() {
+  const fresh = (now() - slamStatusTs) < 3000 && slamStatus;
+  const lamp = $('slamLamp'), hdr = $('hdrSlam');
+  let cls = 'off', txt = 'NO SIGNAL';
+  if (fresh) {
+    const st = slamStatus.vo_state;
+    if (st === 1)      { cls = 'ok';  txt = 'TRACKING'; }
+    else if (st === 2) { cls = 'bad'; txt = 'LOST'; }
+    else               { cls = 'warn'; txt = 'UNKNOWN'; }
+  }
+  lamp.className = 'slam-lamp ' + cls;
+  $('slamLampTxt').textContent = txt;
+  hdr.className = 'v lamp ' + cls;
+  $('hdrSlamTxt').textContent = txt;
+
+  $('slamHz').textContent = fmt(navState.vslam.meter.hz, 1) + ' Hz';
+  $('slamExec').textContent = fresh ? fmt(slamStatus.track_execution_time * 1000, 1) + ' ms' : '--';
+  $('slamExecMean').textContent = fresh ? fmt(slamStatus.track_execution_time_mean * 1000, 1) + ' ms' : '--';
+  $('slamVoState').textContent = fresh ? (slamStatus.vo_state + ' / ' + (VO_STATES[slamStatus.vo_state] || '?')) : '--';
+  $('panelSlam').classList.toggle('stale', !fresh && navState.vslam.meter.ageMs() > 3000);
+}
+
+/* ============================================================
+ * PANEL 5 — topic health matrix
+ * ============================================================
+ * Image topics are NOT pulled at full rate: color uses its camera_info twin;
+ * infra1_off has no small twin, so it is an aliveness probe (2 s throttle) —
+ * a real Hz cannot be measured through a throttled subscription.
+ */
+
+const infraMeter = new RateMeter();
+const colorInfoMeter = new RateMeter();
+const tfMeter = new RateMeter();
+
+registerTopic({
+  name: '/camera/color/camera_info', type: 'sensor_msgs/CameraInfo',
+  handler: () => colorInfoMeter.tick(),
+});
+registerTopic({
+  name: '/camera/infra1_off/image_raw', type: 'sensor_msgs/Image',
+  throttle: 2000, compression: 'cbor',
+  handler: () => infraMeter.tick(),
+});
+registerTopic({
+  name: '/tf', type: 'tf2_msgs/TFMessage',
+  handler: () => tfMeter.tick(),
+});
+
+/* expected rates measured live on this robot 2026-07-03:
+ * color info 30, yolo 30, vslam odom 7.5, wheel odom 7.5, tf ~13 */
+const HEALTH = [
+  { label: 'CAM COLOR',  meter: colorInfoMeter,        expect: 30,  note: 'via camera_info' },
+  { label: 'INFRA OFF',  meter: infraMeter,            expect: null, alive: true, note: 'probe 0.5 Hz' },
+  { label: 'VSLAM ODOM', meter: navState.vslam.meter,  expect: 7.5 },
+  { label: 'YOLO DET',   meter: yoloMeter,             expect: 30,  idleOk: true, idleTxt: 'GATED' },
+  { label: 'CMD VEL',    meter: cmdMeter,              expect: null, idleOk: true, idleTxt: 'IDLE' },
+  { label: 'WHEEL ODOM', meter: navState.enc.meter,    expect: 7.5 },
+  { label: 'TF',         meter: tfMeter,               expect: 13 },
+];
+
+const healthGrid = $('healthGrid');
+for (const h of HEALTH) {
+  const el = document.createElement('div');
+  el.className = 'hcell idle';
+  el.innerHTML = '<span class="t">' + h.label + '</span>' +
+                 '<span class="hz">--</span><span class="st">WAIT</span>' +
+                 (h.note ? '<span class="t" style="opacity:.6">' + h.note + '</span>' : '');
+  healthGrid.appendChild(el);
+  h.el = el;
+  h.hzEl = el.querySelector('.hz');
+  h.stEl = el.querySelector('.st');
+}
+
+function renderHealth() {
+  for (const h of HEALTH) {
+    let cls, hzTxt, stTxt;
+    if (h.alive) {
+      const live = h.meter.ageMs() < 5000;
+      cls = live ? 'ok' : (connected ? 'bad' : 'idle');
+      hzTxt = live ? 'LIVE' : '--';
+      stTxt = live ? 'STREAMING' : (connected ? 'STALE' : 'WAIT');
+    } else {
+      const hz = h.meter.hz;
+      hzTxt = hz > 0 ? hz.toFixed(1) : '0.0';
+      if (!connected) { cls = 'idle'; stTxt = 'WAIT'; }
+      else if (hz <= 0.01) {
+        if (h.idleOk) { cls = 'idle'; stTxt = h.idleTxt || 'IDLE'; hzTxt = '--'; }
+        else { cls = 'bad'; stTxt = 'DOWN'; }
+      } else if (h.expect && hz < h.expect * 0.6) { cls = 'warn'; stTxt = 'DEGRADED'; }
+      else { cls = 'ok'; stTxt = 'NOMINAL'; }
+    }
+    h.el.className = 'hcell ' + cls;
+    h.hzEl.textContent = hzTxt + (h.alive || hzTxt === '--' ? '' : ' Hz');
+    h.stEl.textContent = stTxt;
+  }
+}
+
+/* ============================================================
+ * PANEL 6 — event log (/rosout)
+ * ============================================================ */
+
+const logView = $('logView');
+const LOG_MAX = 500;
+let logCount = 0;
+let logAutoScroll = true;
+let logTraceNodes = true;
+const sevOn = { 10: false, 20: false, 30: true, 40: true, 50: true };
+const SEV_NAME = { 10: 'DEBUG', 20: 'INFO', 30: 'WARN', 40: 'ERROR', 50: 'FATAL' };
+const TRACE_RE = /(motor_controller|behavior_manager)/;
+
+document.querySelectorAll('.log-tools [data-sev]').forEach(b => {
+  b.addEventListener('click', () => {
+    const s = Number(b.dataset.sev);
+    sevOn[s] = !sevOn[s];
+    b.classList.toggle('on', sevOn[s]);
+  });
+});
+$('logTrace').addEventListener('click', (e) => {
+  logTraceNodes = !logTraceNodes;
+  e.currentTarget.classList.toggle('on', logTraceNodes);
+});
+$('logScroll').addEventListener('click', (e) => {
+  logAutoScroll = !logAutoScroll;
+  e.currentTarget.classList.toggle('on', logAutoScroll);
+});
+$('logClear').addEventListener('click', () => {
+  logView.innerHTML = ''; logCount = 0; $('logMeta').textContent = '0 rows';
+});
+
+function appendLog(sev, node, msg, tsStr) {
+  const row = document.createElement('div');
+  row.className = 'lrow sev' + sev;
+  const t = document.createElement('span'); t.className = 'lt'; t.textContent = tsStr;
+  const s = document.createElement('span'); s.className = 'lsev'; s.textContent = SEV_NAME[sev] || String(sev);
+  const n = document.createElement('span'); n.className = 'lnode'; n.textContent = node;
+  const m = document.createElement('span'); m.className = 'lmsg'; m.textContent = msg;
+  row.append(t, s, n, m);
+  logView.appendChild(row);
+  logCount++;
+  while (logView.childElementCount > LOG_MAX) logView.removeChild(logView.firstElementChild);
+  if (logAutoScroll) logView.scrollTop = logView.scrollHeight;
+  $('logMeta').textContent = Math.min(logCount, LOG_MAX) + ' rows' + (logCount > LOG_MAX ? ' (capped)' : '');
+}
+
+function logSystem(msg) {
+  appendLog(20, 'console', msg, new Date().toTimeString().slice(0, 8));
+}
+
+registerTopic({
+  name: '/rosout', type: 'rcl_interfaces/Log', throttle: 0, queue: 50,
+  handler: (msg) => {
+    const sev = msg.level;                       // 10/20/30/40/50
+    const node = msg.name || '?';
+    const traced = logTraceNodes && TRACE_RE.test(node);
+    if (!sevOn[sev] && !traced) return;
+    const d = msg.stamp ? new Date(msg.stamp.sec * 1000) : new Date();
+    appendLog(sev, node, msg.msg || '', d.toTimeString().slice(0, 8));
+  },
+});
+
+/* ============================================================
+ * schedulers
+ * ============================================================ */
+
+// 2 s Hz window roll
+const HZ_WINDOW = 2000;
+setInterval(() => {
+  [camMeter, yoloMeter, cmdMeter, battMeter, slamStatusMeter,
+   colorInfoMeter, infraMeter, tfMeter,
+   navState.vslam.meter, navState.enc.meter].forEach(m => m.roll(HZ_WINDOW));
+  renderHealth();
+}, HZ_WINDOW);
+
+// fast UI refresh
+setInterval(() => {
+  renderDrive();
+  renderSlam();
+
+  // camera panel meta + staleness
+  const camFresh = camMeter.ageMs() < 4000;
+  $('panelCam').classList.toggle('stale', !camFresh);
+  $('camHudStats').textContent = camFresh
+    ? fmt(camMeter.hz, 1) + ' fps (throttled) · ' + lastYolo.length + ' det'
+    : 'awaiting frames';
+  $('camMeta').textContent = STREAMS[activeStream].label;
+
+  // nav panel staleness
+  const navFresh = navState.vslam.meter.ageMs() < 4000 || navState.enc.meter.ageMs() < 4000;
+  $('panelNav').classList.toggle('stale', !navFresh);
+  $('navMeta').textContent = 'vslam ' + fmt(navState.vslam.meter.hz, 1) +
+                             ' Hz · enc ' + fmt(navState.enc.meter.hz, 1) + ' Hz';
+
+  // uptime
+  if (sessionStart) {
+    const s = Math.floor((now() - sessionStart) / 1000);
+    const hh = String(Math.floor(s / 3600)).padStart(2, '0');
+    const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+    const ss = String(s % 60).padStart(2, '0');
+    $('hdrUptime').textContent = hh + ':' + mm + ':' + ss;
+  }
+}, 500);
+
+/* ---------- boot ---------- */
+logSystem('SUDS mission control boot — target ' + WS_URL);
+connect();
+renderCam();
+renderNav();
+</script>
+</body>
+</html>

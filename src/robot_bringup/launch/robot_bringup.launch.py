@@ -16,7 +16,7 @@ NO background bash jobs - everything is a proper ROS2 node/launch include.
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction, ExecuteProcess
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command, PythonExpression
 from launch_ros.actions import Node, ComposableNodeContainer
@@ -222,6 +222,16 @@ def generate_launch_description():
 
     
     # 2. Visual SLAM - direct topic remapping (no relay nodes for zero latency)
+    # Splits infra/depth streams by per-frame emitter state (see the emitter
+    # TimerAction below). Stereo OFF-frames go out as atomic pairs for VSLAM.
+    emitter_splitter_node = Node(
+        package='clothes_perception',
+        executable='emitter_splitter',
+        name='emitter_splitter',
+        output='screen',
+        condition=IfCondition(enable_slam)
+    )
+
     visual_slam_node = ComposableNode(
         name='visual_slam_node',
         package='isaac_ros_visual_slam',
@@ -245,7 +255,9 @@ def generate_launch_description():
             'accel_noise_density': 0.001862,
             'accel_random_walk': 0.003,
             'calibration_frequency': 200.0,
-            'image_jitter_threshold_ms': 120.00,
+            # Frames arrive at ~15 Hz (emitter_on_off halves the VSLAM stream),
+            # so the nominal inter-frame delta is ~67 ms and stutters are 133+.
+            'image_jitter_threshold_ms': 200.00,
             'enable_rectified_pose': True,
             'enable_slam_visualization': True,
             'enable_landmarks_view': True,
@@ -262,9 +274,10 @@ def generate_launch_description():
             ],
         }],
         remappings=[
-            ('visual_slam/image_0', '/camera/infra1/image_rect_raw'),
+            # Dot-free (emitter-off) frames only — see emitter_splitter above.
+            ('visual_slam/image_0', '/camera/infra1_off/image_raw'),
             ('visual_slam/camera_info_0', '/camera/infra1/camera_info'),
-            ('visual_slam/image_1', '/camera/infra2/image_rect_raw'),
+            ('visual_slam/image_1', '/camera/infra2_off/image_raw'),
             ('visual_slam/camera_info_1', '/camera/infra2/camera_info'),
             ('visual_slam/imu', '/camera/imu'),
         ],
@@ -344,6 +357,32 @@ def generate_launch_description():
         executable='component_container',
         composable_node_descriptions=[nvblox_node],
         output='screen',
+        condition=IfCondition(enable_nvblox)
+    )
+
+    # INTERIM self-body filter: zero the depth pixels closer than min_range_m
+    # (the forward-cantilevered arm) before nvblox integrates them, so the arm
+    # stops appearing as a lethal obstacle dead ahead. Only needed when nvblox
+    # runs. Stopgap until the URDF-aware dynamic self-filter replaces it.
+    depth_self_filter_node = Node(
+        package='depth_self_filter',
+        executable='depth_self_filter_node',
+        name='depth_self_filter_node',
+        output='screen',
+        parameters=[{
+            # DISABLED (0.0 = passthrough). A blunt near-range cutoff is UNSAFE:
+            # the arm spans ~0.3-1.3 m in range, so any cutoff wide enough to clear
+            # it also blinds the robot to REAL obstacles in that range. We learned
+            # this the hard way 2026-06-26 — a 1.5 m cutoff masked a table and the
+            # robot drove into it. The correct fix filters the arm by SHAPE
+            # (cuMotion Robot Segmenter -> nvblox_human_node mask/image input); see
+            # memory arm-self-filter-nvblox-solution. Until that is in place, leave
+            # this at 0.0 so the arm simply blocks forward nav (the SAFE failure
+            # mode: the planner refuses to drive rather than drive blind).
+            'min_range_m': 0.0,
+            'input_topic': '/camera/depth/image_rect_raw',
+            'output_topic': '/camera/depth/image_self_filtered',
+        }],
         condition=IfCondition(enable_nvblox)
     )
     
@@ -555,9 +594,11 @@ def generate_launch_description():
         condition=IfCondition(enable_visualization)
     )
     
-    # 10. HTTP server for web viewer
+    # 10. HTTP server for the operator console (ui/ is bind-mounted to
+    # /opt/vision_ws/ui in docker-compose.yml; index.html is the console).
+    # The old root-level *_viewer.html pages are deprecated and no longer served.
     http_server = ExecuteProcess(
-        cmd=['python3', '-m', 'http.server', '8080', '--directory', '/opt/vision_ws'],
+        cmd=['python3', '-m', 'http.server', '8080', '--directory', '/opt/vision_ws/ui'],
         output='screen',
         condition=IfCondition(enable_visualization)
     )
@@ -602,6 +643,7 @@ def generate_launch_description():
         # 3s), so "ros2 param set" hit "node not found". When this re-apply
         # fails, auto-exposure never re-enables, infra drops to ~15Hz (long
         # exposure), and cuVSLAM starves and drifts. Retry until it lands.
+        # Non-SLAM runs only: plain auto-exposure re-apply (frame-rate fix).
         TimerAction(
             period=5.0,
             actions=[
@@ -615,11 +657,57 @@ def generate_launch_description():
                          '  sleep 2; '
                          'done; '
                          'echo "[auto-exposure] FAILED to re-apply after retries"; exit 1'],
-                    output='screen'
+                    output='screen',
+                    condition=UnlessCondition(enable_slam)
                 )
             ]
         ),
+        # Emitter alternation for VSLAM (2026-07-02): the IR dot projector
+        # poisons cuVSLAM feature tracking — projected dots move WITH the robot,
+        # so VO reads ~zero motion (THE root cause of "cuVSLAM untrustworthy").
+        # emitter_on_off alternates the projector per frame; emitter_splitter
+        # then routes dot-free frames to VSLAM and dotted frames to depth
+        # consumers. NOTE: the emitter params in rs_params above do NOT take
+        # effect at init (verified: emitter stayed ON) — set them here at
+        # runtime, retry until the param service answers.
+        #
+        # 2026-07-03: exposure must be MANUAL and SHORT. Auto-exposure runs the
+        # window out to ~32ms (the full 30fps frame period), so the emitter-off
+        # frame integrates the neighboring on-phase and residual dots leak into
+        # the VSLAM stream (validated: AE 32ms -> ~5k dots in off frames;
+        # manual 14ms -> 0 dots, VO within 3-4% of encoder truth).
+        # auto_exposure_limit is IGNORED by firmware, and exposure/gain writes
+        # are LOCKED while emitter_on_off is active — so the order below is
+        # load-bearing: alternation off -> AE off -> exposure/gain -> emitter
+        # on -> alternation on. emitter_splitter's brightness governor adapts
+        # gain afterwards using the same unlock dance.
+        TimerAction(
+            period=8.0,
+            actions=[
+                ExecuteProcess(
+                    cmd=['bash', '-c',
+                         'for i in $(seq 1 40); do '
+                         '  if ros2 param set /camera/camera depth_module.emitter_on_off false '
+                         '     && ros2 param set /camera/camera depth_module.enable_auto_exposure false '
+                         '     && ros2 param set /camera/camera depth_module.exposure 14000 '
+                         '     && ros2 param set /camera/camera depth_module.gain 220 '
+                         '     && ros2 param set /camera/camera depth_module.emitter_enabled 1 '
+                         '     && ros2 param set /camera/camera depth_module.emitter_on_off true; then '
+                         '    echo "[emitter] manual-exposure + on_off alternation applied OK on attempt $i"; exit 0; '
+                         '  fi; '
+                         '  sleep 2; '
+                         'done; '
+                         'echo "[emitter] FAILED to apply emitter_on_off after retries"; exit 1'],
+                    output='screen',
+                    condition=IfCondition(enable_slam)
+                )
+            ]
+        ),
+        emitter_splitter_node,
         visual_slam_container,
+        # depth_self_filter_node intentionally NOT launched: the blunt near-range
+        # cutoff proved unsafe (blinded the robot to a table). The package stays in
+        # src/ as the insertion point for the SHAPE-based cuMotion self-filter.
         nvblox_container,
         vision_container,
         yolo_encoder_launch,

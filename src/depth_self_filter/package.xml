@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>depth_self_filter</name>
+  <version>0.1.0</version>
+  <description>
+    Removes the robot's own body from a depth image before nvblox integrates it,
+    so self-structure (e.g. the forward-cantilevered arm) does not appear as a
+    false obstacle in the Nav2 costmap.
+
+    INTERIM: the current node is a static near-range cutoff (zeros depth pixels
+    closer than min_range_m). It is a stopgap valid only while the arm holds a
+    fixed pose. The real solution is a URDF-aware self-filter (render the arm's
+    collision geometry from the camera view using joint_states + TF and mask
+    those pixels), which handles the arm moving while driving.
+  </description>
+  <maintainer email="aaronhorowitz97@gmail.com">Aaron Horowitz</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

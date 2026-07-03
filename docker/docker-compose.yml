@@ -59,6 +59,7 @@ services:
       - /dev/i2c-7:/dev/i2c-7
       - ../src:/opt/vision_ws/src
       - ../tests:/opt/vision_ws/tests
+      - ../ui:/opt/vision_ws/ui:ro  # operator console (served by http.server on 8080)
       - ../models:/models
       - slam_data:/tmp/cuvslam
       - /dev:/dev

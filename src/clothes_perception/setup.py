@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'clothes_perception_node = clothes_perception.clothes_perception_node:main',
+            'emitter_splitter = clothes_perception.emitter_splitter:main',
         ],
     },
 )
