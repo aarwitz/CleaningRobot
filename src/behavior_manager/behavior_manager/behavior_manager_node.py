@@ -379,6 +379,11 @@ class BehaviorManagerNode(Node):
     
     def send_random_wander_goal(self):
         """Send random exploration goal around current position"""
+        # Supervised gate: enter_wander() also calls this (e.g. after RECOVER),
+        # so the gate must live here, not only in update_wander — otherwise a
+        # random Nav2 goal escapes the moment any state falls back to WANDER.
+        if not self.get_parameter('autonomous_wander').value:
+            return
         if self.current_odom is None:
             self.get_logger().warn('No odometry yet, cannot wander')
             return
