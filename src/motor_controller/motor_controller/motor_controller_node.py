@@ -364,6 +364,18 @@ class MotorControllerNode(Node):
         self.u_prev = [0.0, 0.0, 0.0, 0.0]
         self._write_motors([0, 0, 0, 0])
         time.sleep(self.move_settle_sec)
+        self._log_battery()
+
+    def _log_battery(self):
+        """Battery ADC (reg 0x00, mV LE) — supply-sag telemetry for the brick
+        hunt. Only ever called from the io_group (same serialization rule as
+        encoder reads); read failures are logged, never raised."""
+        try:
+            raw = self._i2c_retry(self.bus.read_i2c_block_data, self.i2c_addr, 0x00, 2)
+            mv = struct.unpack('<H', bytes(raw))[0]
+            self.get_logger().info(f'battery: {mv} mV')
+        except OSError as e:
+            self.get_logger().warn(f'battery read failed: {e}')
 
     def _run_axis(self, w_start, idx, target, vmag, tol, is_yaw):
         """Closed-loop drive of one body axis (0=fwd,1=strafe,2=yaw) to target."""

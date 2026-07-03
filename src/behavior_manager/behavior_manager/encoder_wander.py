@@ -52,8 +52,10 @@ class SockMission(Node):
         self.declare_parameter('max_picks', 3)          # end mission after this many picks
         self.declare_parameter('wander_budget', 12)     # moves+turns per wander leg
         self.declare_parameter('hop_max_m', 0.5)
-        self.declare_parameter('hop_min_m', 0.25)
-        self.declare_parameter('clear_margin_m', 0.7)   # keep this much space beyond a hop
+        self.declare_parameter('hop_min_m', 0.15)
+        # 0.7 demanded a 0.95m lane and the robot just spun in tight areas;
+        # 0.45 still leaves ~1.5 robot-lengths beyond every hop
+        self.declare_parameter('clear_margin_m', 0.45)
         self.declare_parameter('turn_rad', 0.5)         # per-turn yaw (~29 deg), keep <=0.6
         self.declare_parameter('max_consecutive_turns', 7)
         self.declare_parameter('settle_s', 1.5)
@@ -247,6 +249,7 @@ class SockMission(Node):
         log = self.get_logger()
         turns = 0
         stuck = False
+        turn_dir = 0  # commit to one direction while blocked (no L/R dither)
         for i in range(p('wander_budget')):
             if (not p('navigate_only') and self.detection is not None
                     and time.monotonic() - self.detection_stamp < 1.0):
@@ -274,18 +277,22 @@ class SockMission(Node):
                 else:
                     log.info(f'[wander] hop {hop:.2f} → actual {res.actual_dx:.3f}')
                 turns = 0
+                turn_dir = 0
             else:
                 turns += 1
                 if turns > p('max_consecutive_turns'):
                     log.warn('[wander] boxed in — stopping')
                     return 'boxed_in'
-                # Direction: clearance decides when one side is clearly better;
-                # otherwise steer toward less-visited territory
-                if abs(left - right) > 0.4:
-                    to_left = left > right
-                else:
-                    to_left = self._visits_toward(1.0) <= self._visits_toward(-1.0)
-                dyaw = p('turn_rad') if to_left else -p('turn_rad')
+                # Direction: once turning, keep going the same way until a hop
+                # lands (L/R dithering trapped it in corners). First turn of a
+                # block: clearance if one side is clearly better, else coverage.
+                if turn_dir == 0:
+                    if abs(left - right) > 0.4:
+                        to_left = left > right
+                    else:
+                        to_left = self._visits_toward(1.0) <= self._visits_toward(-1.0)
+                    turn_dir = 1 if to_left else -1
+                dyaw = turn_dir * p('turn_rad')
                 res = self.move(dyaw=dyaw)
                 if res is None or not res.success:
                     log.error(f'[wander] turn failed: {getattr(res, "message", "timeout")}')
