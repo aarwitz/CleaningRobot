@@ -44,7 +44,7 @@ services:
       CAMERA_FPS: "30"
       ENABLE_BEHAVIOR: "false"
       ENABLE_NAV2: "true"
-      ENABLE_NVBLOX: "false"
+      ENABLE_NVBLOX: "true"
       ENABLE_VISUALIZATION: "true"
       # CYCLONEDDS_URI: /root/.cyclonedds.xml
       # RMW_IMPLEMENTATION: rmw_cyclonedds_cpp

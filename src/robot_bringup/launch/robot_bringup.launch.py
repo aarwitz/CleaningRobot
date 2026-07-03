@@ -249,6 +249,15 @@ def generate_launch_description():
             # impossible. See memory slam-drift-from-15hz-infra (Part 2).
             'enable_ground_constraint_in_odometry': True,
             'enable_ground_constraint_in_slam': True,
+            # VO-only (2026-07-03): the SLAM/pose-graph layer diverged during
+            # the first Nav2 drive and published map->odom with NaN translation
+            # FOREVER after (34k+ TF_NAN errors; every map-frame consumer
+            # poisoned). It also caused the historical z=10-47m teleports.
+            # NVIDIA's nvblox+nav2 reference runs vslam VO-only too — nvblox
+            # can't absorb loop-closure jumps. With this false, map->odom is a
+            # constant identity and VO+IMU (validated 0.6-4% of encoder truth)
+            # carries localization.
+            'enable_localization_n_mapping': False,
             'enable_imu_fusion': enable_imu,
             'gyro_noise_density': 0.000244,
             'gyro_random_walk': 0.000019393,
@@ -291,6 +300,12 @@ def generate_launch_description():
         executable='component_container',
         composable_node_descriptions=[visual_slam_node],
         output='screen',
+        # cuVSLAM has a heap bug (free(): invalid pointer -> SIGABRT) when a
+        # huge inter-frame gap hits it (seen 2026-07-03 at boot). The splitter
+        # gates the gap-producing frames now, but if it ever dies again the
+        # whole nav stack must not stay down.
+        respawn=True,
+        respawn_delay=5.0,
         condition=IfCondition(enable_slam)
     )
     
@@ -340,7 +355,12 @@ def generate_launch_description():
             # on the infra/depth-module clock; color-aligned depth is stamped
             # ~67ms ahead of it, so lookups would need extrapolation into the
             # future. Raw depth shares SLAM's exact clock (measured 0.0ms).
-            ('camera_0/depth/image', '/camera/depth/image_rect_raw'),
+            # depth_on = emitter-ON frames only (emitter_splitter). With
+            # emitter_on_off alternation, half the raw depth frames are
+            # dot-free and degraded (validity 90%->63% on textureless
+            # surfaces) — integrate only the dotted half (15 Hz). Stamps are
+            # unchanged, so camera_info pairing still matches exactly.
+            ('camera_0/depth/image', '/camera/depth_on/image_raw'),
             ('camera_0/depth/camera_info', '/camera/depth/camera_info'),
             ('camera_0/color/image', '/camera/color/image_raw'),
             ('camera_0/color/camera_info', '/camera/color/camera_info'),

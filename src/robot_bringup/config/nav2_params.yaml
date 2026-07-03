@@ -60,7 +60,9 @@ bt_navigator:
 controller_server:
   ros__parameters:
     use_sim_time: False
-    controller_frequency: 20.0
+    # 10 Hz: at 20 the loop missed its rate constantly on the Jetson with
+    # nvblox+YOLO+VSLAM sharing the SoC; 10 Hz is plenty at 0.26 m/s.
+    controller_frequency: 10.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.05  # holonomic: allow small strafe velocities through
     min_theta_velocity_threshold: 0.001
@@ -86,19 +88,32 @@ controller_server:
       xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.25
     
-    # DWB parameters (for indoor navigation)
+    # RotationShim wrapping DWB: DWB with min_vel_x=0 (forward-only — the
+    # camera must face travel) cannot reach a goal behind the robot; it stalls
+    # and aborts "Failed to make progress" (observed on the first return goal
+    # 2026-07-03). The shim rotates in place toward the path heading first
+    # (exactly the validated turn-then-glide motion pattern), then hands off
+    # to DWB. Rotation speed matches the yaw-safe 0.4 rad/s.
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "dwb_core::DWBLocalPlanner"
+      angular_dist_threshold: 0.5    # rad (~29deg): beyond this, rotate first
+      forward_sampling_distance: 0.4
+      rotate_to_heading_angular_vel: 0.4
+      max_angular_accel: 1.5
+      simulate_ahead_time: 1.0
       debug_trajectory_details: True
       # Holonomic mecanum: strafing enabled (max/min_vel_y) so the planner can
       # move sideways/diagonally instead of pivoting. Rotation is capped hard
       # (max_vel_theta + gentle accel) because a sustained in-place pivot stalls
       # all four wheels against each other and browns out the I2C motor driver.
+      # 0.4 rad/s is the validated safe yaw (0.6 bricked the 0x34 board;
+      # 23 consecutive turns clean at 0.4 — see motor memory 2026-07-02).
       min_vel_x: 0.0
       min_vel_y: -0.22
       max_vel_x: 0.26
       max_vel_y: 0.22
-      max_vel_theta: 0.6
+      max_vel_theta: 0.4
       min_speed_xy: 0.0
       max_speed_xy: 0.26
       min_speed_theta: 0.0
@@ -252,15 +267,18 @@ behavior_server:
       plugin: "nav2_behaviors/DriveOnHeading"
     wait:
       plugin: "nav2_behaviors/Wait"
-    global_frame: odom
+    # MUST match the local costmap's frame (map): the spin/backup behaviors
+    # collision-check against the local costmap, and with mismatched frames
+    # every spin died with "Pose Goes Off Grid" (observed 2026-07-03).
+    global_frame: map
     robot_base_frame: base_link
-    transform_tolerance: 0.1
+    transform_tolerance: 0.3  # absorb cuVSLAM TF latency (see local_costmap)
     use_sim_time: false
     simulate_ahead_time: 2.0
     # In-place Spin recovery is the worst case for the I2C driver (sustained
     # full-speed pivot stalls all 4 wheels and browns it out), so cap it to match
-    # the controller's max_vel_theta.
-    max_rotational_vel: 0.6
+    # the controller's max_vel_theta (0.4 = validated safe; 0.6 bricked the board).
+    max_rotational_vel: 0.4
     min_rotational_vel: 0.3
     rotational_acc_lim: 3.2
 
@@ -287,8 +305,10 @@ velocity_smoother:
     # y enabled the holonomic command passes through cleanly and the base crabs
     # smoothly instead of pivoting (pivoting browns out the I2C driver — see the
     # FollowPath comment and memory motor-driver-i2c-contention-kills-board).
-    max_velocity: [0.26, 0.22, 1.0]
-    min_velocity: [-0.26, -0.22, -1.0]
+    # theta clamp 0.4: the smoother is the LAST gate before /cmd_vel reaches
+    # the motor node; 0.6+ rad/s pivots brick the 0x34 driver.
+    max_velocity: [0.26, 0.22, 0.4]
+    min_velocity: [-0.26, -0.22, -0.4]
     max_accel: [2.5, 2.5, 3.2]
     max_decel: [-2.5, -2.5, -3.2]
     odom_topic: "/visual_slam/tracking/odometry"

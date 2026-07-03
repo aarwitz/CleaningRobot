@@ -45,6 +45,7 @@ class EmitterSplitter(Node):
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                          history=HistoryPolicy.KEEP_LAST, depth=30)
         self._lock = threading.Lock()
+        self._last_mode1_t = 0.0  # alternation gate (see _emit_pair)
         # stereo pairing: stamp -> {'i1':, 'i2':, 'mode':}
         self._pairs = {}
         self._pair_count = 0
@@ -78,9 +79,12 @@ class EmitterSplitter(Node):
         # exposure/gain writes are LOCKED while emitter_on_off is active, so
         # every adjustment does the unlock dance: on_off false -> set -> true.
         self.declare_parameter('governor_enabled', True)
-        self.declare_parameter('bright_lo', 30.0)
-        self.declare_parameter('bright_hi', 110.0)
-        self.declare_parameter('bright_target', 60.0)
+        # Night-time IR indoors: brighter is better for cuVSLAM feature
+        # density (validated: mean 43 -> 29 corners, mean 219 -> 102).
+        # Ceiling guards true saturation only.
+        self.declare_parameter('bright_lo', 45.0)
+        self.declare_parameter('bright_hi', 170.0)
+        self.declare_parameter('bright_target', 110.0)
         self.declare_parameter('exposure_max', 14000)   # us; bleed-free ceiling @30fps
         self.declare_parameter('exposure_min', 2000)
         self._gov_enabled = self.get_parameter('governor_enabled').value
@@ -90,6 +94,7 @@ class EmitterSplitter(Node):
         self._exp_max = self.get_parameter('exposure_max').value
         self._exp_min = self.get_parameter('exposure_min').value
         self._ema = None            # EMA of off-frame mean brightness
+        self._ema_std = 0.0         # EMA of off-frame stddev (contrast)
         self._cur_gain = 220.0      # mirrors launch boot values; resynced on set
         self._cur_exp = float(self._exp_max)
         self._gov_busy = False
@@ -129,6 +134,8 @@ class EmitterSplitter(Node):
     def _on_infra_meta(self, msg):
         k = self._key(msg)
         mode = self._mode_of(msg)
+        if mode == 1:
+            self._last_mode1_t = time.monotonic()
         with self._lock:
             e = self._pairs.setdefault(k, {})
             e['mode'] = mode
@@ -141,36 +148,66 @@ class EmitterSplitter(Node):
             self._emit_pair(e)
 
     def _emit_pair(self, e):
-        if e['mode'] == 0:
-            self.pub_i1.publish(e['i1'])
-            self.pub_i2.publish(e['i2'])
-            self._pair_count += 1
-            if self._pair_count % 15 == 1:  # ~1 Hz brightness sample
-                self._sample_brightness(e['i1'])
+        if e['mode'] != 0:
+            return
+        # Alternation gate: only pass off-frames while on-frames are ALSO
+        # flowing (mode=1 seen <0.5s ago). During camera init the emitter is
+        # briefly off, so a trickle of mode=0 frames leaks out BEFORE the
+        # launch's emitter sequence lands; cuVSLAM then sees a ~15s gap to the
+        # next frame and dies on a heap bug (free(): invalid pointer,
+        # observed 2026-07-03). Alternating streams see mode=1 every ~66ms,
+        # so this gate is transparent in normal operation.
+        if time.monotonic() - self._last_mode1_t > 0.5:
+            return
+        self.pub_i1.publish(e['i1'])
+        self.pub_i2.publish(e['i2'])
+        self._pair_count += 1
+        if self._pair_count % 15 == 1:  # ~1 Hz brightness sample
+            self._sample_brightness(e['i1'])
 
     # --- brightness governor --------------------------------------------------
 
     def _sample_brightness(self, msg):
         mv = memoryview(msg.data)[::631]
-        mean = sum(mv) / max(1, len(mv))
-        self._ema = mean if self._ema is None else 0.7 * self._ema + 0.3 * mean
+        n = max(1, len(mv))
+        mean = sum(mv) / n
+        var = sum((v - mean) ** 2 for v in mv) / n
+        std = var ** 0.5
+        if self._ema is None:
+            self._ema, self._ema_std = mean, std
+        else:
+            self._ema = 0.7 * self._ema + 0.3 * mean
+            self._ema_std = 0.7 * self._ema_std + 0.3 * std
 
     def _governor_tick(self):
+        # Step-based (not proportional): RealSense gain units are ~dB-scaled
+        # (a +28-unit step measured 5x brightness), so a linear model
+        # overshoots wildly. Fixed ~4dB steps + resample converge instead.
         if (self._gov_busy or self._ema is None
                 or time.monotonic() < self._gov_cooldown_until):
             return
-        if self._bright_lo <= self._ema <= self._bright_hi:
+        new_gain, new_exp = self._cur_gain, self._cur_exp
+        if self._ema > self._bright_hi:
+            # Low-contrast guard: in dark feature-poor scenes (blank walls)
+            # brightness is what keeps cuVSLAM alive — never dim a scene that
+            # is bright but still flat.
+            if self._ema_std < 15.0:
+                return
+            if self._cur_gain > 16:
+                new_gain = max(16.0, self._cur_gain - 16.0)
+            else:
+                new_exp = max(float(self._exp_min), self._cur_exp * 0.6)
+        elif self._ema < self._bright_lo:
+            if self._cur_exp < self._exp_max:
+                new_exp = min(float(self._exp_max), self._cur_exp / 0.6)
+            elif self._cur_gain < 248:
+                new_gain = min(248.0, self._cur_gain + 16.0)
+            else:
+                return  # pegged bright; nothing left
+        else:
             return
-        scale = self._bright_target / max(1.0, self._ema)
-        # gain first (16..248), spill remainder into exposure (2000..exp_max)
-        want = self._cur_gain * scale
-        new_gain = min(248.0, max(16.0, want))
-        resid = want / new_gain
-        new_exp = min(float(self._exp_max),
-                      max(float(self._exp_min), self._cur_exp * resid))
-        if (abs(new_gain - self._cur_gain) < 8.0
-                and abs(new_exp - self._cur_exp) < 500.0):
-            return  # saturated against limits; nothing meaningful to change
+        if new_gain == self._cur_gain and new_exp == self._cur_exp:
+            return
         self._gov_busy = True
         threading.Thread(target=self._apply_exposure,
                          args=(int(new_exp), int(new_gain)), daemon=True).start()
