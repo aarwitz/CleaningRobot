@@ -333,6 +333,14 @@ def generate_launch_description():
             # correct. max=1.0 captures furniture/walls.
             'static_mapper.esdf_slice_min_height': 0.10,
             'static_mapper.esdf_slice_max_height': 1.0,
+            # TSDF decay defaults (factor 0.95 @ 5 Hz = ~2.7 s half-life) turn
+            # the map into a flashlight beam: everything off-view is forgotten
+            # in seconds, so the planner saw the robot as boxed-in the moment
+            # it turned. 0.995 @ 1 Hz = ~4 min half-life: the map persists
+            # across a room traverse but stale ghosts still self-heal (there is
+            # NO clear_map service in this build — decay is the only eraser).
+            'static_mapper.tsdf_decay_factor': 0.995,
+            'decay_tsdf_rate_hz': 1.0,
             'distance_slice': True,
             'mesh': True,  # Enable mesh output for visualization
             'max_tsdf_update_hz': 10.0,
@@ -536,6 +544,10 @@ def generate_launch_description():
             'control_rate': 20.0,
         }],
         output='screen',
+        # The I2C init/battery paths are defensive now, but if the process
+        # ever dies the whole drive train is gone — always come back.
+        respawn=True,
+        respawn_delay=5.0,
         condition=IfCondition(enable_nav2)  # Only when Nav2 is enabled
     )
     
@@ -553,7 +565,9 @@ def generate_launch_description():
             'stable_max_drift_px': 40.0,
             'cooldown_s': 5.0,
             'min_depth_m': 0.15,
-            'max_depth_m': 0.60,
+            # 0.36: picks proven at cam z~=0.31; z=0.37 fell SHORT (edge of
+            # reach). The mission creeps to z<=0.35 before arming the loop.
+            'max_depth_m': 0.36,
         }],
         output='screen',
         condition=IfCondition(enable_arm)

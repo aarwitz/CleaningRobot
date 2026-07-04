@@ -19,7 +19,7 @@ from vision_msgs.msg import Detection2D
 from geometry_msgs.msg import PointStamped
 from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
-from behavior_manager_interfaces.srv import GetSock3D
+from behavior_manager_interfaces.srv import GetSock3D, PanCamera
 import json
 import math
 import time
@@ -125,6 +125,13 @@ class ArmBridgeNode(Node):
             Trigger, '/arm_bridge/execute_pick', self._execute_pick_cb,
             callback_group=cb_group,
         )
+        # Camera pan: the RealSense is mounted on the BASE joint, so rotating
+        # joint 1 pans the camera without touching the wheels. Range +-180 deg.
+        self.pan_srv = self.create_service(
+            PanCamera, '/arm_bridge/pan_camera', self._pan_camera_cb,
+            callback_group=cb_group,
+        )
+        self.pan_angle = 0.0
 
         # Status publisher for web viewer / debugging
         self.status_pub = self.create_publisher(String, '/arm/status', 10)
@@ -269,6 +276,8 @@ class ArmBridgeNode(Node):
             self.consecutive_detections = 0
             self.prev_cx = 0.0
             self.prev_cy = 0.0
+            # place/home returns the base joint (and the camera on it) to 0
+            self.pan_angle = 0.0
             self.busy = False
 
     # ── Behavior-manager coordination services ────────────────────────────
@@ -328,6 +337,34 @@ class ArmBridgeNode(Node):
             return None
 
         return resp.point
+
+    # ── Camera pan (base joint) ───────────────────────────────────────────
+    def _pan_camera_cb(self, request, response):
+        """Rotate BASE_JOINT (joint 1) to an absolute angle — pans the
+        RealSense mounted on it. Open-loop: wait out the motion, then reply.
+        Refused while a pick sequence owns the arm."""
+        if self.busy:
+            response.success = False
+            response.message = 'arm busy (pick in progress)'
+            return response
+        # +-114.6 deg HARD LIMIT: beyond ~120 deg the camera mount collides
+        # with other hardware on the chassis (operator constraint 2026-07-04).
+        angle = max(-2.0, min(2.0, float(request.angle_rad)))
+        delta = abs(angle - self.pan_angle)
+        # spd is servo steps/s (4096 = one rev). 100 ~= 8.8 deg/s: at 200 a
+        # +-110 deg sweep cost cuVSLAM ~0.36 m / 17 deg of phantom pose
+        # drift (measured 2026-07-04); slower pans keep feature lock.
+        spd = 100
+        # firmware generations disagree on the key name (rad vs radian);
+        # send both — unknown keys are ignored.
+        ok = self._send({'T': 101, 'joint': 1, 'rad': angle, 'radian': angle,
+                         'spd': spd, 'acc': 5},
+                        delay=delta * (4096 / (2 * math.pi)) / spd + 0.8)
+        if ok:
+            self.pan_angle = angle
+        response.success = ok
+        response.message = f'pan at {math.degrees(self.pan_angle):.0f} deg'
+        return response
 
     # ── Arm sequences ─────────────────────────────────────────────────────
     def _execute_pick(self, rs_x, rs_y, rs_z) -> bool:

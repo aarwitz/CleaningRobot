@@ -39,7 +39,7 @@ services:
       ALIGN_DEPTH: "true"
       ENABLE_DEPTH: "true"
       ENABLE_COLOR: "true"
-      ENABLE_ARM: "false"
+      ENABLE_ARM: "true"
       ENABLE_IMU: "true"
       CAMERA_FPS: "30"
       ENABLE_BEHAVIOR: "false"

@@ -1,0 +1,7 @@
+# Rotate the arm base joint to an absolute angle to pan the RealSense that
+# is mounted on it (0 = home/forward, + = CCW/left). The wheels do not move.
+# Blocks until the motion should be complete (open-loop timing).
+float64 angle_rad
+---
+bool success
+string message

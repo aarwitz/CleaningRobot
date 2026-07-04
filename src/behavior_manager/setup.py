@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'behavior_manager_node = behavior_manager.behavior_manager_node:main',
+            'mission_director = behavior_manager.mission_director:main',
         ],
     },
 )

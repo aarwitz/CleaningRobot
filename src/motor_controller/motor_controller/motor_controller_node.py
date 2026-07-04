@@ -193,15 +193,8 @@ class MotorControllerNode(Node):
         self.dt = 1.0 / self.control_rate
 
         # --- I2C init ---
-        try:
-            self.bus = smbus.SMBus(self.bus_id)
-            self._i2c_retry(self.bus.write_byte_data, self.i2c_addr, 0x14, 1)
-            self._i2c_retry(self.bus.write_byte_data, self.i2c_addr, 0x15, 0)
-            self.get_logger().info(
-                f'I2C initialized on bus {self.bus_id}, addr 0x{self.i2c_addr:02x}')
-        except Exception as e:
-            self.get_logger().error(f'Failed to initialize I2C: {e}')
-            self.bus = None
+        self.bus = None
+        self._try_init_i2c()
 
         # --- State ---
         self.state = State.IDLE
@@ -382,10 +375,32 @@ class MotorControllerNode(Node):
         time.sleep(self.move_settle_sec)
         self._log_battery()
 
+    def _try_init_i2c(self):
+        """(Re)open the bus and configure the 0x34 driver. The board can be
+        hung off the bus at boot (errno 110 — e.g. a previous shutdown killed
+        a transaction mid-flight); it comes back only after a power cycle, so
+        the battery timer keeps retrying this instead of the node dying."""
+        try:
+            bus = smbus.SMBus(self.bus_id)
+            self._i2c_retry(bus.write_byte_data, self.i2c_addr, 0x14, 1)
+            self._i2c_retry(bus.write_byte_data, self.i2c_addr, 0x15, 0)
+            self.bus = bus
+            self.get_logger().info(
+                f'I2C initialized on bus {self.bus_id}, addr 0x{self.i2c_addr:02x}')
+            return True
+        except Exception as e:
+            self.get_logger().error(
+                f'Failed to initialize I2C: {e} (motor board absent/hung — '
+                'power cycle it; will keep retrying)')
+            self.bus = None
+            return False
+
     def _log_battery(self):
         """Battery ADC (reg 0x00, mV LE) — supply-sag telemetry for the brick
         hunt. Only ever called from the io_group (same serialization rule as
         encoder reads); read failures are logged, never raised."""
+        if self.bus is None:
+            return
         try:
             raw = self._i2c_retry(self.bus.read_i2c_block_data, self.i2c_addr, 0x00, 2)
             mv = struct.unpack('<H', bytes(raw))[0]
@@ -397,7 +412,11 @@ class MotorControllerNode(Node):
     def _battery_timer_cb(self):
         """Slow idle-only battery poll for telemetry/UI. Skips whenever the
         motors have written within 2 s — reads must never interleave with
-        motion (same brick rule as encoder reads)."""
+        motion (same brick rule as encoder reads). Doubles as the I2C
+        reconnect loop while the bus is down."""
+        if self.bus is None:
+            self._try_init_i2c()
+            return
         if any(self.u_prev) or (time.monotonic() - self._last_write_t) < 2.0:
             return
         self._log_battery()

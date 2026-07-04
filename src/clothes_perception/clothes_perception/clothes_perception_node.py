@@ -53,6 +53,9 @@ class ClothesPerceptionNode(Node):
         self.declare_parameter('min_depth_m', 0.2)
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
         self.declare_parameter('rate_hz', 5.0)
+        # Physical-size gate: reject "clothes" wider than this (bins, bags,
+        # sofas). A sprawled T-shirt is ~0.5m; socks ~0.15m. 0 disables.
+        self.declare_parameter('max_target_width_m', 0.55)
         self.declare_parameter('net_w', 640)  # YOLO network input width
         self.declare_parameter('net_h', 640)  # YOLO network input height
         
@@ -266,21 +269,25 @@ class ClothesPerceptionNode(Node):
         # Process the queued detection
         msg = self.pending_detection
         self.pending_detection = None
-        
-        # Find best clothes detection
+
+        # Candidates above threshold, best-first, then take the first that
+        # passes the physical-size gate (a rejected bin must not shadow a real
+        # sock elsewhere in the frame).
+        conf_th = self.get_parameter('confidence_threshold').value
+        candidates = sorted(
+            (d for d in msg.detections
+             if d.results and d.results[0].hypothesis.score > conf_th),
+            key=lambda d: d.results[0].hypothesis.score, reverse=True)
+
         best_detection = None
-        best_confidence = self.get_parameter('confidence_threshold').value
-        
-        for detection in msg.detections:
-            if not detection.results:
+        best_confidence = 0.0
+        for detection in candidates[:3]:  # cap depth lookups per cycle
+            if not self.passes_size_gate(detection):
                 continue
-            
-            confidence = detection.results[0].hypothesis.score
-            
-            if confidence > best_confidence:
-                best_detection = detection
-                best_confidence = confidence
-        
+            best_detection = detection
+            best_confidence = detection.results[0].hypothesis.score
+            break
+
         if best_detection:
             self.latest_detection = best_detection
             self.detection_pub.publish(best_detection)  # 2D only - no depth processing!
@@ -289,6 +296,35 @@ class ClothesPerceptionNode(Node):
                 throttle_duration_sec=2.0
             )
     
+    def passes_size_gate(self, detection) -> bool:
+        """Reject detections physically too large to be a garment on the floor.
+
+        The single-class detectors fire on laundry bins, big bags, and
+        furniture fabric. Estimated width = bbox_width_px * depth / fx.
+        Pass-through (True) when depth is unavailable — the gate only kills
+        detections it can positively size as oversized; the 3D stage and the
+        arm's own gates still guard the rest.
+        """
+        max_w = self.get_parameter('max_target_width_m').value
+        if max_w <= 0.0 or self.latest_depth_image is None:
+            return True
+        point_3d = self.extract_3d_point(detection, self.latest_depth_image)
+        if point_3d is None:
+            return True
+        # bbox size is in network coords; same letterbox scale as the center.
+        scale = min(self.get_parameter('net_w').value / float(self.camera_info.width),
+                    self.get_parameter('net_h').value / float(self.camera_info.height))
+        width_px = detection.bbox.size_x / max(scale, 1e-6)
+        width_m = width_px * float(point_3d[2]) / self.camera_info.k[0]
+        if width_m > max_w:
+            self.get_logger().info(
+                f'size gate: rejected {width_m:.2f}m-wide detection '
+                f'(conf {detection.results[0].hypothesis.score:.2f}, '
+                f'z={point_3d[2]:.2f}m) — not a garment',
+                throttle_duration_sec=2.0)
+            return False
+        return True
+
     def extract_3d_point(self, detection, depth_image: np.ndarray) -> np.ndarray:
         """
         Extract 3D point from detection bbox and depth image.

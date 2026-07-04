@@ -18,6 +18,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetDetectionRate.srv"
   "srv/GetSock3D.srv"
   "srv/DriveRelative.srv"
+  "srv/PanCamera.srv"
   DEPENDENCIES std_msgs geometry_msgs vision_msgs
 )
 
