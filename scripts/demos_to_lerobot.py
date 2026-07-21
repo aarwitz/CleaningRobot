@@ -94,7 +94,7 @@ def main():
             'episode_index': kept,
             'frame_index': i,
             'index': total_frames - len(rows) + i,
-            'timestamp': round(i / args.fps, 4),
+            'timestamp': round(i / fps, 4),
             'observation.state': states[i].tolist(),
             'action': actions[i].tolist(),
             'observation.images.exterior': frames[i],
@@ -116,7 +116,7 @@ def main():
     (out / 'meta' / 'info.json').write_text(json.dumps({
         'codebase_version': 'v2.0',
         'robot_type': 'roarm_m2s',
-        'fps': args.fps,
+        'fps': fps,
         'total_episodes': kept,
         'total_frames': total_frames,
         'features': {

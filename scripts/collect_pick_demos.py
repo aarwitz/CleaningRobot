@@ -43,8 +43,18 @@ except ImportError:
 
 # ── gripper (command values clamp to these actuals) ──────────────────────────
 OPEN, CLOSED = 0.0, 3.14
-EMPTY_CLOSE_T = 3.132        # measured: gripper closed on nothing
-HELD_T_MAX = 3.110           # below this after closing => something is held
+# Grasp detection. Closing on nothing settles at t=3.132 with torH=-32; a held
+# sock reads torH=-80 closing and -64 after the lift, while t barely moves
+# (3.114). Gripper TORQUE is therefore the discriminating signal, not angle.
+EMPTY_CLOSE_T, EMPTY_TORH = 3.132, 32
+HELD_TORH_MIN = 50           # |torH| above this => something is in the gripper
+HELD_T_MAX = 3.115           # corroborating (weak) angle signal
+
+
+def is_held(fb):
+    if fb is None:
+        return False
+    return abs(fb.get('torH', 0)) >= HELD_TORH_MIN or fb.get('t', 9) <= HELD_T_MAX
 
 # ── workspace (arm frame, mm) ───────────────────────────────────────────────
 R_SAFE_MAX = 265.0
@@ -247,28 +257,49 @@ def sampled_move(arm, rec, x, y, z, grip, dwell, phase, hz=10.0):
         time.sleep(1.0 / hz)
 
 
-def grasp(arm, rec, x, y, floor_z, offsets=(4.0, -1.0, -6.0)):
-    """Close on the object, verifying with gripper feedback. Retries lower on
-    failure — flat fabric needs the fingertips at floor level."""
-    for i, off in enumerate(offsets):
-        z = floor_z + off
-        sampled_move(arm, rec, x, y, floor_z + APPROACH, OPEN, 1.6, 'approach')
-        sampled_move(arm, rec, x, y, z, OPEN, 1.8, 'descend')
-        sampled_move(arm, rec, x, y, z, CLOSED, 2.0, 'grasp')
+# Offsets searched around the nominal pick point when the first close misses.
+# Grasping flat terry cloth with these tapered prongs is very fold-dependent:
+# a 7-position sweep found exactly one spot that survived a lift, so a miss at
+# the nominal point says nothing about the neighbours.
+SEARCH_OFFSETS = ((0, 0), (0, 22), (0, -22), (0, 44), (0, -44), (-18, 0), (18, 0))
+VERIFY_LIFT = 60.0           # mm; closing torque alone is NOT proof of a grasp
+
+
+def grasp(arm, rec, x, y, floor_z, depth=12.0):
+    """Close on the object and verify by lifting.
+
+    Depth stays ABOVE the probed contact height — the fingertips reach the
+    wood before the probe's torque threshold trips, so floor_z sits a few mm
+    below true contact and pressing into it scrapes the floor without
+    improving the grip.
+
+    Returns (held, actual_xy, grasp_z) with the arm already lifted by
+    VERIFY_LIFT when held, since that lift doubles as the episode's own.
+    """
+    z = floor_z + depth
+    for i, (dx, dy) in enumerate(SEARCH_OFFSETS):
+        gx, gy = x + dx, y + dy
+        phase = 'grasp' if i == 0 else 'research'
+        sampled_move(arm, rec, gx, gy, floor_z + APPROACH, OPEN, 1.6, 'approach')
+        sampled_move(arm, rec, gx, gy, z, OPEN, 1.8, 'descend')
+        sampled_move(arm, rec, gx, gy, z, CLOSED, 2.2, phase)
+        sampled_move(arm, rec, gx, gy, z + VERIFY_LIFT, CLOSED, 1.9, 'lift')
         fb = arm.feedback()
-        held = fb is not None and fb['t'] < HELD_T_MAX
-        print(f'    grasp try {i + 1} at z={z:.1f}: t={fb["t"]:.3f} '
-              f'torH={fb["torH"]} -> {"HELD" if held else "empty"}')
-        if held:
-            return True, z
-        sampled_move(arm, rec, x, y, z, OPEN, 1.0, 'regrip')
-    return False, None
+        if is_held(fb):
+            print(f'    grasp at ({gx:.0f},{gy:.0f}) z={z:.0f}: '
+                  f'torH={fb["torH"]} -> HELD')
+            return True, (gx, gy), z
+        if i == 0:
+            print(f'    nominal point empty (torH={fb["torH"]}); searching...')
+        sampled_move(arm, rec, gx, gy, z, CLOSED, 1.7, 'regrip')
+        sampled_move(arm, rec, gx, gy, z, OPEN, 1.2, 'regrip')
+    return False, None, None
 
 
 def release(arm, rec, x, y, floor_z):
     sampled_move(arm, rec, x, y, floor_z + LIFT, CLOSED, 1.8, 'transit')
-    sampled_move(arm, rec, x, y, floor_z + 12.0, CLOSED, 1.8, 'place')
-    sampled_move(arm, rec, x, y, floor_z + 12.0, OPEN, 1.5, 'release')
+    sampled_move(arm, rec, x, y, floor_z + 16.0, CLOSED, 1.8, 'place')
+    sampled_move(arm, rec, x, y, floor_z + 16.0, OPEN, 1.5, 'release')
     sampled_move(arm, rec, x, y, floor_z + LIFT, OPEN, 1.5, 'retreat')
 
 
@@ -277,22 +308,23 @@ def run_episode(arm, rec, idx, pick, place, floors, prompt):
     qx, qy = place
     rec.start(idx, {'pick': [px, py, floors[pick]], 'place': [qx, qy, floors[place]],
                     'prompt': prompt})
-    held, gz = grasp(arm, rec, px, py, floors[pick])
+    held, actual, gz = grasp(arm, rec, px, py, floors[pick])
     if not held:
         # retreat BEFORE closing the episode, else those samples write frames
         # that no trajectory row references
         sampled_move(arm, rec, px, py, floors[pick] + LIFT, OPEN, 1.5, 'abort')
         rec.end(False, extra={'failure': 'grasp'})
         return False
-    sampled_move(arm, rec, px, py, floors[pick] + LIFT, CLOSED, 1.8, 'lift')
+    ax, ay = actual
+    sampled_move(arm, rec, ax, ay, floors[pick] + LIFT, CLOSED, 1.8, 'lift')
     fb = arm.feedback()
-    if fb is not None and fb['t'] >= HELD_T_MAX:
+    if not is_held(fb):
         print('    object dropped during lift')
         rec.end(False, extra={'failure': 'dropped'})
         return False
     release(arm, rec, qx, qy, floors[place])
     sampled_move(arm, rec, *HOME, OPEN, 2.0, 'home')
-    rec.end(True, extra={'grasp_z': gz})
+    rec.end(True, extra={'grasp_z': gz, 'actual_pick': [ax, ay]})
     return True
 
 
