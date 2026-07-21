@@ -21,6 +21,15 @@ Hardware facts measured on this arm (2026-07-21) that this script depends on:
     commanded z stops tracking) and cached.
   * Reach dies around r=330 mm; r<=265 is safe.
 
+THE PICK SURFACE MUST BE RAISED ~100 mm (2026-07-21). The D455 is bolted to the
+arm's rotating base, ~120 mm off the floor, pitched only 2.5 deg down, with a
+~42 deg vertical FOV — so it sees down to about -18.5 deg. A floor pick at
+r=250 sits atan(120/250) = 25.6 deg below the lens, i.e. ~7 deg BELOW the
+bottom of the frame. Episodes recorded that way show the gripper occluding the
+centre and the object clipped off the bottom edge, which is useless for
+training a policy. Standing the object on a flat, rigid ~100 mm platform puts
+it at ~4.6 deg — mid-frame — and the probe below starts high enough to clear it.
+
 Run INSIDE the container with arm_bridge STOPPED (this owns the serial port):
   docker exec docker-vision-1 kill $(pgrep -f arm_bridge_node)
 
@@ -136,23 +145,39 @@ class Arm:
             self.ser.close()
 
 
-def probe_floor(arm, x, y, start_z=-150.0, step=6.0, err_limit=7.0,
-                tor_limit=140.0, floor_min=-280.0):
+def probe_surface(arm, x, y, start_z=170.0, coarse=16.0, fine=4.0, err_limit=8.0,
+                  tor_limit=150.0, min_z=-280.0):
     """Descend at (x, y) until the wrist stops tracking the commanded z or the
-    elbow torque spikes. Returns the contact z, or None if never reached."""
-    arm.go(x, y, start_z, OPEN, 2.6)
-    z = start_z
-    while z > floor_min:
-        z -= step
-        arm.go(x, y, z, OPEN, 1.15)
-        fb = arm.feedback()
-        if fb is None:
-            return None
-        if (fb['z'] - z) > err_limit or fb['torE'] > tor_limit:
-            contact = fb['z']
-            arm.go(x, y, min(start_z, contact + 60), OPEN, 1.2)
-            return round(contact, 1)
-    return None
+    elbow torque spikes. Returns the contact z, or None if never reached.
+
+    Starts from ABOVE any elevated pick surface. The floor-only version began
+    at -150 mm, which drives the gripper into the side of anything raised — and
+    a raised surface is exactly what keeps the object inside the camera's view
+    (a floor pick at r=250 sits ~26 deg below the lens, past the frame edge).
+
+    Two passes so the higher start costs little time: coarse steps find the
+    surface, then a fine pass from just above it recovers the accuracy the old
+    6 mm descent had.
+    """
+    def descend(from_z, step):
+        arm.go(x, y, from_z, OPEN, 2.2)
+        z = from_z
+        while z > min_z:
+            z -= step
+            arm.go(x, y, z, OPEN, 0.9)
+            fb = arm.feedback()
+            if fb is None:
+                return None
+            if (fb['z'] - z) > err_limit or fb['torE'] > tor_limit:
+                return fb['z']
+        return None
+
+    hit = descend(start_z, coarse)
+    if hit is None:
+        return None
+    hit = descend(hit + 2 * coarse, fine) or hit
+    arm.go(x, y, hit + 60, OPEN, 1.2)
+    return round(hit, 1)
 
 
 class Recorder:
@@ -352,6 +377,10 @@ def main():
     ap.add_argument('--port', default='/dev/ttyUSB0')
     ap.add_argument('--baud', type=int, default=115200)
     ap.add_argument('--seed', type=int, default=None)
+    ap.add_argument('--surface-tol', type=float, default=15.0,
+                    help='mm the cached surface map may drift before refusing to run')
+    ap.add_argument('--surface-span', type=float, default=25.0,
+                    help='mm a grid point may sit off the pick surface and still be used')
     ap.add_argument('--calibrate', action='store_true', help='probe the floor grid')
     ap.add_argument('--point-at', default=None,
                     help='park the open gripper hovering over "x,y" and exit')
@@ -376,7 +405,7 @@ def main():
         pts = grid_points()
         print(f'calibrating {len(pts)} grid points...')
         for (x, y) in pts:
-            z = probe_floor(arm, x, y)
+            z = probe_surface(arm, x, y)
             floors[(x, y)] = z
             print(f'  ({x:6.1f},{y:6.1f}) floor z = {z}')
         arm.home()
@@ -391,6 +420,38 @@ def main():
     if start not in floors:
         start = min(floors, key=lambda p: math.dist(p, start))
         print(f'start point snapped to nearest calibrated grid point {start}')
+
+    # A cached map from a different pick surface is dangerous, not just wrong:
+    # every descent is commanded to surface+depth, so a map taken on the floor
+    # would drive the gripper ~100 mm into a raised platform at full torque.
+    # Re-probe one point and refuse to run if reality has moved.
+    check = probe_surface(arm, *start)
+    if check is None:
+        print(f'no contact at {start}; is the pick surface in reach?')
+        arm.close()
+        return
+    if abs(check - floors[start]) > args.surface_tol:
+        print(f'surface at {start} is {check} but the map says {floors[start]} '
+              f'(> {args.surface_tol:.0f} mm). Re-run with --calibrate.')
+        arm.close()
+        return
+    floors[start] = check
+
+    # Place points must land on the SAME surface as the pick. A grid point that
+    # overhangs a raised platform probes down to the floor ~100 mm lower, and
+    # placing there would drop the object out of the camera's view and break the
+    # chain that makes the next pick's position known.
+    on_surface = {p: z for p, z in floors.items()
+                  if abs(z - floors[start]) <= args.surface_span}
+    if len(on_surface) < len(floors):
+        print(f'ignoring {len(floors) - len(on_surface)} grid point(s) off the '
+              f'pick surface (>{args.surface_span:.0f} mm from it)')
+    if len(on_surface) < 2:
+        print('need at least 2 points on the pick surface; use a wider platform '
+              'or re-run with --calibrate')
+        arm.close()
+        return
+    floors = on_surface
 
     rec = Recorder(args.out, use_camera=not args.no_camera)
     if not rec.wait_for_camera():
