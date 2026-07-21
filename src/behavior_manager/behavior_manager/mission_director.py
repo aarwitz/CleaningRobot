@@ -87,6 +87,7 @@ class MissionDirector(Node):
         self.arm_busy = False
         self.pick_events = 0
         self.blacklist = []          # [(x, y)] map-frame picked/abandoned socks
+        self.pick_fails = []         # [(x, y)] map-frame failed pick attempts
         self.last_fix = None         # (cam_pt, map_pt, t) most recent good fix
         self.state = 'INIT'
 
@@ -479,7 +480,8 @@ class MissionDirector(Node):
         """Encoder hops until the freshest fix is inside the pick window."""
         p = self.get_parameter
         self.set_state('CREEP')
-        for i in range(8):
+        in_env = 0  # consecutive fixes inside the pick window
+        for i in range(10):
             cam, mp = self.sock_fix()
             if cam is None:
                 self.get_logger().warn('[mission] creep: fix lost')
@@ -488,7 +490,14 @@ class MissionDirector(Node):
             self.get_logger().info(
                 f'[mission] creep{i}: cam ({cam.x:.2f},{cam.y:.2f},{cam.z:.2f})')
             if cam.z <= p('approach_stop_z_m').value:
-                return 'parked'
+                # grazing-angle floor depth reads SHORT; demand two
+                # consecutive in-envelope fixes before trusting it
+                in_env += 1
+                if in_env >= 2:
+                    return 'parked'
+                time.sleep(0.7)
+                continue
+            in_env = 0
             step = min(p('creep_hop_max_m').value,
                        max(0.08, rng - p('creep_margin_m').value))
             res = self.move(dx=step * cam.z / rng, dy=step * (-cam.x) / rng)
@@ -498,7 +507,8 @@ class MissionDirector(Node):
         return 'parked'
 
     def do_pick(self, mp):
-        """Arm pick (parked) or simulated pick; blacklist the spot either way."""
+        """Arm pick (parked) or simulated pick; blacklist on success or
+        after repeated failures at the same spot."""
         self.set_state('PICK')
         picked = False
         if self.get_parameter('simulate_pick').value:
@@ -521,7 +531,20 @@ class MissionDirector(Node):
             else:
                 self.get_logger().warn('[mission] arm service missing - simulating')
                 picked = True
-        self.blacklist.append((mp.x, mp.y))
+        if picked:
+            self.blacklist.append((mp.x, mp.y))
+        else:
+            # blacklist only after repeated failures at the same spot, so a
+            # single timeout doesn't abandon a real sock
+            self.pick_fails.append((mp.x, mp.y))
+            r = self.get_parameter('blacklist_radius_m').value
+            fails_here = sum(1 for x, y in self.pick_fails
+                             if math.hypot(mp.x - x, mp.y - y) < r)
+            if fails_here >= 2:
+                self.get_logger().warn(
+                    f'[mission] giving up on ({mp.x:.2f},{mp.y:.2f}) '
+                    f'after {fails_here} failed picks - blacklisting')
+                self.blacklist.append((mp.x, mp.y))
         # clear the stability window so the same frames don't re-trigger
         with self._lock:
             self.det_times = []

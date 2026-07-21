@@ -284,8 +284,13 @@ class MotorControllerNode(Node):
         self._i2c_retry(self.bus.write_i2c_block_data, self.i2c_addr, 0x33, block)
 
     def _clamp_cmd(self, u):
-        if abs(u) < self.min_cmd:
+        if abs(u) < 0.4 * self.min_cmd:
             return 0
+        if abs(u) < self.min_cmd:
+            # Deadband compensation: Nav2 rotation commands (~0.2 rad/s) map to
+            # ~14 counts, under the ~20-count motor deadband — without a floor
+            # the base silently ignores them and goals time out.
+            u = math.copysign(self.min_cmd, u)
         return max(-self.max_cmd, min(self.max_cmd, int(u)))
 
     def _rate_limit(self, new, old):
@@ -485,6 +490,12 @@ class MotorControllerNode(Node):
             f'DriveRelative: dx={request.dx:.3f} dy={request.dy:.3f} dyaw={request.dyaw:.3f}')
         final = [0.0, 0.0, 0.0]
         try:
+            # The 0x34 board NACKs reads that follow a write stream too closely
+            # (errno 121 when a move starts right after Nav2 stops commanding).
+            # Give the bus a quiet window before the first encoder read.
+            quiet = time.monotonic() - self._last_write_t
+            if quiet < 0.6:
+                time.sleep(0.6 - quiet)
             w_start = self._read_wheels()
             # Yaw first (aim), then forward+strafe together as one smooth
             # vector move. Cross-axis coupling is negligible (validated).
