@@ -41,7 +41,8 @@ def main():
     ap.add_argument('--out', default='lerobot_sock')
     ap.add_argument('--prompt', default=None,
                     help='override the per-episode prompt')
-    ap.add_argument('--fps', type=int, default=10)
+    ap.add_argument('--fps', type=float, default=None,
+                    help='default: measured from the recorded timestamps')
     ap.add_argument('--successful-only', action='store_true', default=True)
     args = ap.parse_args()
 
@@ -55,6 +56,15 @@ def main():
     eps = sorted(d for d in demos.glob('ep_*') if (d / 'traj.jsonl').exists())
     kept, total_frames = 0, 0
     episode_index = []
+
+    fps = args.fps
+    if fps is None:                 # serial feedback paces sampling, not the loop
+        dts = []
+        for ep in eps:
+            _, rows = load_episode(ep)
+            dts += [b['t'] - a['t'] for a, b in zip(rows, rows[1:])]
+        fps = round(1.0 / float(np.median(dts)), 2) if dts else 10.0
+        print(f'measured sampling rate: {fps} Hz')
 
     for ep in eps:
         meta, rows = load_episode(ep)

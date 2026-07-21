@@ -104,7 +104,10 @@ class Arm:
                     d = json.loads(line)
                 except ValueError:
                     continue
-                if d.get('T') == 1051 or ('x' in d and 'z' in d):
+                # NB: a T:104 echo also carries x/y/z/t, so match on the joint
+                # keys that only real feedback has — otherwise the echo is
+                # recorded as a sample with null joints and commanded cart.
+                if d.get('T') == 1051 or ('b' in d and 'e' in d):
                     return d
         return None
 
@@ -162,7 +165,19 @@ class Recorder:
         self._node = rclpy.create_node('demo_recorder')
         self._node.create_subscription(
             CompressedImage, topic, lambda m: setattr(self, 'latest', bytes(m.data)), 5)
-        threading.Thread(target=rclpy.spin, args=(self._node,), daemon=True).start()
+
+        # spin_once in a stoppable loop: rclpy.spin() cannot be interrupted, and
+        # tearing the context down under it aborts the process at exit
+        self._stop = threading.Event()
+
+        def _spin():
+            while not self._stop.is_set() and rclpy.ok():
+                try:
+                    rclpy.spin_once(self._node, timeout_sec=0.1)
+                except Exception:
+                    break
+        self._thread = threading.Thread(target=_spin, daemon=True)
+        self._thread.start()
 
     def wait_for_camera(self, timeout=15.0):
         if not self.use_camera:
@@ -211,8 +226,15 @@ class Recorder:
                 f.write(json.dumps(r) + '\n')
 
     def close(self):
-        if self.use_camera:
+        if not self.use_camera:
+            return
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+        try:
+            self._node.destroy_node()
             self._rclpy.shutdown()
+        except Exception:
+            pass
 
 
 def sampled_move(arm, rec, x, y, z, grip, dwell, phase, hz=10.0):
@@ -257,8 +279,10 @@ def run_episode(arm, rec, idx, pick, place, floors, prompt):
                     'prompt': prompt})
     held, gz = grasp(arm, rec, px, py, floors[pick])
     if not held:
-        rec.end(False, extra={'failure': 'grasp'})
+        # retreat BEFORE closing the episode, else those samples write frames
+        # that no trajectory row references
         sampled_move(arm, rec, px, py, floors[pick] + LIFT, OPEN, 1.5, 'abort')
+        rec.end(False, extra={'failure': 'grasp'})
         return False
     sampled_move(arm, rec, px, py, floors[pick] + LIFT, CLOSED, 1.8, 'lift')
     fb = arm.feedback()
