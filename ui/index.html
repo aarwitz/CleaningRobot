@@ -135,6 +135,24 @@
     .p-health { grid-column: span 6; }
   }
 
+  /* ---------- pi policy ---------- */
+  .pi-tools { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
+  .pi-tools input[type="text"] {
+    flex: 1; min-width: 180px;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.5px;
+    color: var(--ink); background: var(--bg-deep);
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 5px 10px; outline: none;
+  }
+  .pi-tools input[type="text"]:focus { border-color: var(--cyan-mark); }
+  #piCanvas { display: block; width: 100%; background: var(--bg-deep); border: 1px solid var(--line); border-radius: 4px; }
+  .pi-read { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; font-size: 11px; }
+  .pi-read .cell { background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 5px 8px; }
+  .pi-read .k { font-size: 9px; letter-spacing: 1.5px; color: var(--muted); display: block; }
+  .pi-read .cyan { color: var(--cyan); }
+  .pi-read .amber { color: var(--amber); }
+  .pi-read .red { color: var(--red, #ef4444); }
+
   /* NO SIGNAL veil */
   .nosig {
     position: absolute; inset: 0;
@@ -424,6 +442,25 @@
   </section>
 
   <!-- LOG -->
+  <section class="panel p-pi" id="panelPi">
+    <div class="panel-hd">π Policy // pi0.5-DROID<span class="meta" id="piMeta">idle</span></div>
+    <div class="panel-bd">
+      <div class="pi-tools">
+        <input type="text" id="piPrompt" value="pick up the sock" spellcheck="false">
+        <button class="btn" id="piInfer">INFER</button>
+        <button class="btn" id="piAuto">AUTO 0.5Hz</button>
+      </div>
+      <canvas id="piCanvas" width="1200" height="300"></canvas>
+      <div class="pi-read">
+        <div class="cell"><span class="k">SERVER</span><span class="cyan" id="piServer">--</span></div>
+        <div class="cell"><span class="k">LATENCY</span><span class="cyan" id="piLatency">--</span></div>
+        <div class="cell"><span class="k">CHUNK</span><span class="amber" id="piShape">--</span></div>
+        <div class="cell"><span class="k">STATUS</span><span id="piStatus" style="color:var(--dim)">no bridge</span></div>
+      </div>
+      <div class="nosig"><span>NO POLICY LINK</span></div>
+    </div>
+  </section>
+
   <section class="panel p-log" id="panelLog">
     <div class="panel-hd">Event Log // /rosout<span class="meta" id="logMeta">0 rows</span></div>
     <div class="panel-bd">
@@ -1153,6 +1190,93 @@ registerTopic({
 });
 
 /* ============================================================
+ * PANEL — pi policy (pi0.5 action chunks via /pi/result)
+ * ============================================================ */
+
+const piCanvas = $('piCanvas');
+const piCtx = piCanvas.getContext('2d');
+const PI_DIM_LABELS = ['J1', 'J2', 'J3', 'J4', 'J5', 'J6', 'J7', 'GRIP'];
+let piLast = null;            // last /pi/result payload
+let piLastTs = 0;
+let piAutoOn = false;
+
+registerTopic({
+  name: '/pi/result', type: 'std_msgs/String',
+  handler: (msg) => {
+    try { piLast = JSON.parse(msg.data); } catch (e) { return; }
+    piLastTs = now();
+    if (piLast.ok) {
+      $('piServer').textContent = piLast.server || '--';
+      $('piLatency').textContent = piLast.latency_ms + ' ms';
+      $('piShape').textContent = piLast.horizon + ' × ' + piLast.dims;
+      $('piStatus').textContent = 'OK';
+      $('piStatus').style.color = 'var(--cyan)';
+      drawPiChunk(piLast.actions);
+    } else {
+      $('piStatus').textContent = (piLast.error || 'error').slice(0, 40);
+      $('piStatus').style.color = 'var(--amber)';
+    }
+    $('piMeta').textContent = '"' + (piLast.prompt || '') + '"';
+  },
+});
+
+function piPublishRequest(mode) {
+  if (!connected) { logSystem('pi: rosbridge not connected'); return; }
+  const topic = new ROSLIB.Topic({
+    ros: ros, name: '/pi/request', messageType: 'std_msgs/String',
+  });
+  topic.publish(new ROSLIB.Message({
+    data: JSON.stringify({ prompt: $('piPrompt').value, mode: mode, rate_hz: 0.5 }),
+  }));
+}
+
+$('piInfer').addEventListener('click', () => piPublishRequest('once'));
+$('piAuto').addEventListener('click', (e) => {
+  piAutoOn = !piAutoOn;
+  e.currentTarget.classList.toggle('on', piAutoOn);
+  piPublishRequest(piAutoOn ? 'auto' : 'stop');
+});
+$('piPrompt').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') piPublishRequest(piAutoOn ? 'auto' : 'once');
+});
+
+/* Sparkline grid: one row per action dim, horizon steps left→right. */
+function drawPiChunk(actions) {
+  const W = piCanvas.width, H = piCanvas.height;
+  piCtx.clearRect(0, 0, W, H);
+  if (!actions || !actions.length) return;
+  const dims = actions[0].length, horizon = actions.length;
+  const rowH = H / dims, padL = 46, padR = 64;
+  const css = getComputedStyle(document.documentElement);
+  const cyan = css.getPropertyValue('--cyan').trim() || '#22d3ee';
+  const amber = css.getPropertyValue('--amber').trim() || '#fbbf24';
+  const muted = css.getPropertyValue('--muted').trim() || '#64748b';
+  const line = css.getPropertyValue('--line').trim() || '#1e293b';
+  piCtx.font = '10px monospace';
+  for (let d = 0; d < dims; d++) {
+    const y0 = d * rowH, yMid = y0 + rowH / 2;
+    const vals = actions.map(a => a[d]);
+    const span = Math.max(0.05, ...vals.map(Math.abs)) * 1.15;
+    piCtx.strokeStyle = line;
+    piCtx.beginPath(); piCtx.moveTo(padL, yMid); piCtx.lineTo(W - padR, yMid); piCtx.stroke();
+    piCtx.fillStyle = muted;
+    piCtx.textAlign = 'right';
+    piCtx.fillText(PI_DIM_LABELS[d] || ('D' + d), padL - 8, yMid + 3);
+    piCtx.fillText(vals[vals.length - 1].toFixed(3), W - 6, yMid + 3);
+    piCtx.strokeStyle = (PI_DIM_LABELS[d] === 'GRIP') ? amber : cyan;
+    piCtx.lineWidth = 1.5;
+    piCtx.beginPath();
+    for (let i = 0; i < horizon; i++) {
+      const x = padL + (W - padL - padR) * (horizon === 1 ? 0 : i / (horizon - 1));
+      const y = yMid - (vals[i] / span) * (rowH / 2 - 3);
+      i === 0 ? piCtx.moveTo(x, y) : piCtx.lineTo(x, y);
+    }
+    piCtx.stroke();
+    piCtx.lineWidth = 1;
+  }
+}
+
+/* ============================================================
  * schedulers
  * ============================================================ */
 
@@ -1183,6 +1307,10 @@ setInterval(() => {
   $('panelNav').classList.toggle('stale', !navFresh);
   $('navMeta').textContent = 'vslam ' + fmt(navState.vslam.meter.hz, 1) +
                              ' Hz · enc ' + fmt(navState.enc.meter.hz, 1) + ' Hz';
+
+  // pi panel staleness: veil until the first result; in AUTO also veil on silence
+  $('panelPi').classList.toggle('stale',
+    piLastTs === 0 || (piAutoOn && now() - piLastTs > 15000));
 
   // uptime
   if (sessionStart) {
