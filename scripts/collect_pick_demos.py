@@ -180,6 +180,16 @@ def probe_surface(arm, x, y, start_z=170.0, coarse=16.0, fine=4.0, err_limit=8.0
     return round(hit, 1)
 
 
+def on_pick_surface(floors, start, span):
+    """Grid points sitting on the same surface as the pick point.
+
+    A point that overhangs a raised platform probes down to the floor ~100 mm
+    lower. Placing the object there would drop it out of the camera's view and
+    break the chain that makes the next episode's pick position known.
+    """
+    return {p: z for p, z in floors.items() if abs(z - floors[start]) <= span}
+
+
 class Recorder:
     """Camera frames + arm state sampled through every motion."""
 
@@ -437,12 +447,7 @@ def main():
         return
     floors[start] = check
 
-    # Place points must land on the SAME surface as the pick. A grid point that
-    # overhangs a raised platform probes down to the floor ~100 mm lower, and
-    # placing there would drop the object out of the camera's view and break the
-    # chain that makes the next pick's position known.
-    on_surface = {p: z for p, z in floors.items()
-                  if abs(z - floors[start]) <= args.surface_span}
+    on_surface = on_pick_surface(floors, start, args.surface_span)
     if len(on_surface) < len(floors):
         print(f'ignoring {len(floors) - len(on_surface)} grid point(s) off the '
               f'pick surface (>{args.surface_span:.0f} mm from it)')
