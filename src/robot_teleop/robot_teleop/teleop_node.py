@@ -31,6 +31,7 @@ import threading
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String
@@ -197,6 +198,26 @@ class TeleopNode(Node):
             self.arm.stop_all()
             if self.arm.reset_firmware():
                 self.arm.poll_feedback(timeout=0.8)
+        elif act.startswith('goto:'):
+            # "goto:x,y,z,t" — absolute placement for scripted setup moves.
+            # Uses the non-blocking T:1041 and still respects the envelope, so
+            # a bad number cannot drive the tool into the camera.
+            try:
+                x, y, z, t = (float(v) for v in act.split(':', 1)[1].split(','))
+            except Exception:
+                self.get_logger().error(f'bad goto: {act}')
+                return
+            r = math.hypot(x, y)
+            r_max = self.get_parameter('r_max').value
+            r_min = self.get_parameter('r_min').value
+            if r > 1e-6 and not (r_min <= r <= r_max):
+                r_c = clamp(r, r_min, r_max)
+                x, y = x * r_c / r, y * r_c / r
+                self.get_logger().warn(f'goto clamped r {r:.0f} -> {r_c:.0f}')
+            z = clamp(z, self.get_parameter('z_min').value,
+                      self.get_parameter('z_max').value)
+            self.arm.stop_all()
+            self.arm.goto(x, y, z, t)
         elif act == 'grip_open':
             self._preset_grip(GRIP_OPEN)
         elif act == 'grip_close':
@@ -383,7 +404,9 @@ def main(args=None):
     node = TeleopNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # Normal on Ctrl-C or a launch-level kill; the finally block still
+        # stops the arm, which is the part that actually matters.
         pass
     finally:
         node.destroy_node()
