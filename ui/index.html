@@ -121,6 +121,7 @@
 
   @media (min-width: 900px) {
     .p-cam    { grid-column: span 7; }
+    .p-teleop { grid-column: span 5; }
     .p-nav    { grid-column: span 5; }
     .p-drive  { grid-column: span 4; }
     .p-slam   { grid-column: span 3; }
@@ -129,6 +130,7 @@
   }
   @media (min-width: 1500px) {
     .p-cam    { grid-column: span 6; }
+    .p-teleop { grid-column: span 6; }
     .p-nav    { grid-column: span 6; }
     .p-drive  { grid-column: span 3; }
     .p-slam   { grid-column: span 3; }
@@ -314,6 +316,54 @@
     text-align: center; color: var(--dim); font-size: 10px; letter-spacing: 2px;
     padding: 4px 0 14px;
   }
+  /* ---------- teleop ---------- */
+  .tel-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .tel-arm {
+    padding: 5px 14px; border-radius: 3px; cursor: pointer; font: inherit; font-size: 12px;
+    letter-spacing: 0.08em; border: 1px solid var(--line-hot);
+    background: var(--panel-2); color: var(--muted);
+  }
+  .tel-arm.on { background: rgba(5,150,105,0.18); border-color: var(--good); color: var(--good-txt); }
+  .tel-estop {
+    padding: 5px 14px; border-radius: 3px; cursor: pointer; font: inherit; font-size: 12px;
+    letter-spacing: 0.08em; border: 1px solid var(--crit); background: rgba(239,68,68,0.12);
+    color: var(--crit-txt); font-weight: 700;
+  }
+  .tel-estop.tripped { background: var(--crit); color: #fff; }
+  .tel-mode { display: flex; gap: 3px; }
+  .tel-mode button {
+    padding: 4px 9px; font: inherit; font-size: 10px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--muted);
+  }
+  .tel-mode button.on { border-color: var(--cyan-mark); color: var(--cyan); background: rgba(8,145,178,0.14); }
+
+  .tel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .tel-sec { font-size: 10px; letter-spacing: 0.16em; color: var(--muted); margin: 2px 0 5px; }
+  .keys { display: grid; grid-template-columns: repeat(3, 30px); gap: 4px; justify-content: center; }
+  .key {
+    height: 27px; display: flex; align-items: center; justify-content: center;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2);
+    font-size: 11px; color: var(--dim); transition: none; user-select: none;
+  }
+  .key.lbl { border: none; background: none; color: var(--muted); font-size: 9px; }
+  .key.hot { background: var(--cyan-mark); border-color: var(--cyan); color: #04222a; font-weight: 700; }
+  .key.spacer { border: none; background: none; }
+
+  .tel-read { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-top: 9px; font-size: 11px; }
+  .tel-read .cell { background: var(--panel-2); border: 1px solid var(--line); padding: 4px 6px; }
+  .tel-read .k { display: block; font-size: 9px; color: var(--muted); letter-spacing: 0.1em; }
+  .tel-envelope { margin-top: 8px; }
+  .env-track { height: 6px; background: var(--bg-deep); border: 1px solid var(--line); position: relative; }
+  .env-fill { position: absolute; top: 0; bottom: 0; background: var(--cyan-mark); }
+  .env-fill.warn { background: var(--warn); }
+  .env-fill.crit { background: var(--crit); }
+  .tel-aux { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
+  .tel-aux button {
+    padding: 4px 8px; font: inherit; font-size: 10px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
+  }
+  .tel-aux button:hover { border-color: var(--line-hot); color: var(--cyan); }
+  .tel-hint { font-size: 10px; color: var(--dim); margin-top: 7px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -362,6 +412,69 @@
         <div class="cam-target" id="camTarget">◈ TARGET LOCK</div>
       </div>
       <div class="nosig"><span>NO SIGNAL</span></div>
+    </div>
+  </section>
+
+  <!-- TELEOP -->
+  <section class="panel p-teleop" id="panelTeleop">
+    <div class="panel-hd">Teleoperation<span class="meta" id="telMeta">DISARMED</span></div>
+    <div class="panel-bd">
+      <div class="tel-top">
+        <button class="tel-arm" id="telArm">ARM ⏎</button>
+        <button class="tel-estop" id="telEstop">■ E-STOP</button>
+        <div class="tel-mode" id="telMode">
+          <button data-mode="precision">1 FINE</button>
+          <button data-mode="normal" class="on">2 NORM</button>
+          <button data-mode="boost">3 FAST</button>
+        </div>
+        <span class="meta" id="telLink" style="margin-left:auto">LINK --</span>
+      </div>
+
+      <div class="tel-grid">
+        <div>
+          <div class="tel-sec">BASE — LEFT HAND</div>
+          <div class="keys">
+            <div class="key spacer"></div><div class="key" data-key="w">W</div><div class="key spacer"></div>
+            <div class="key" data-key="a">A</div><div class="key" data-key="s">S</div><div class="key" data-key="d">D</div>
+            <div class="key" data-key="q">Q</div><div class="key lbl">turn</div><div class="key" data-key="e">E</div>
+          </div>
+        </div>
+        <div>
+          <div class="tel-sec">ARM — RIGHT HAND</div>
+          <div class="keys">
+            <div class="key" data-key="u">U</div><div class="key" data-key="i">I</div><div class="key" data-key="o">O</div>
+            <div class="key" data-key="j">J</div><div class="key" data-key="k">K</div><div class="key" data-key="l">L</div>
+            <div class="key" data-key="[">[</div><div class="key lbl">grip</div><div class="key" data-key="]">]</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tel-read">
+        <div class="cell"><span class="k">ARM X</span><span class="cyan" id="telX">--</span></div>
+        <div class="cell"><span class="k">ARM Y</span><span class="cyan" id="telY">--</span></div>
+        <div class="cell"><span class="k">ARM Z</span><span class="cyan" id="telZ">--</span></div>
+        <div class="cell"><span class="k">GRIP</span><span class="amber" id="telG">--</span></div>
+      </div>
+
+      <div class="tel-envelope">
+        <div class="tel-sec" style="margin-bottom:3px">REACH ENVELOPE <span id="telREnv" style="color:var(--muted)">--</span></div>
+        <div class="env-track"><div class="env-fill" id="telRFill" style="left:0;width:0"></div></div>
+      </div>
+
+      <div class="tel-aux">
+        <button data-act="home">H HOME</button>
+        <button data-act="led">N LED</button>
+        <button data-act="torque_off">T LIMP</button>
+        <button data-act="torque_on">HOLD</button>
+        <button data-act="reset_arm">R RESET</button>
+        <button data-act="clear_estop">CLEAR E-STOP</button>
+      </div>
+
+      <div class="tel-hint">
+        <b>W/A/S/D</b> drive + strafe · <b>Q/E</b> turn · <b>I/K</b> arm reach · <b>J/L</b> arm left/right ·
+        <b>U/O</b> arm up/down · <b>[ / ]</b> gripper open/close · <b>SHIFT</b> hold = fine ·
+        <b>1/2/3</b> speed · <b>SPACE</b> = E-STOP. Motion stops if this tab loses focus.
+      </div>
     </div>
   </section>
 
@@ -1321,6 +1434,190 @@ setInterval(() => {
     $('hdrUptime').textContent = hh + ':' + mm + ':' + ss;
   }
 }, 500);
+
+/* ============================================================
+ * PANEL 7 — TELEOPERATION
+ *
+ * Publishes normalized operator intent to /teleop/cmd at 20 Hz while ARMED.
+ * The server ramps it into real velocities and enforces the arm envelope, so
+ * this file stays a dumb, low-latency input surface — no motion logic here.
+ *
+ * SAFETY: the server runs a deadman on /teleop/cmd. Anything that should stop
+ * the robot is implemented by simply CEASING TO PUBLISH (disarm, tab blur,
+ * page hide, socket loss). Never publish a "stop" and then go quiet; going
+ * quiet IS the stop, and it also covers the cases where this page dies.
+ * ============================================================ */
+const TEL_RATE_MS = 50;                 // 20 Hz
+const TEL_KEYS = ['w','a','s','d','q','e','i','k','j','l','u','o','[',']'];
+
+let telArmed = false;
+let telEstop = false;
+let telLed = false, telLimp = false;
+let telMode = 'normal';
+let telSeq = 0;
+let telCmdTopic = null, telActTopic = null, telTopicsFor = null;
+const telHeld = Object.create(null);
+
+function telTopics() {
+  // Rebuild advertisements after any reconnect (ros object is replaced).
+  if (!ros || !connected) return null;
+  if (telTopicsFor !== ros) {
+    telCmdTopic = new ROSLIB.Topic({ ros: ros, name: '/teleop/cmd', messageType: 'std_msgs/String' });
+    telActTopic = new ROSLIB.Topic({ ros: ros, name: '/teleop/action', messageType: 'std_msgs/String' });
+    telTopicsFor = ros;
+  }
+  return telCmdTopic;
+}
+
+function telAction(act) {
+  telTopics();
+  if (telActTopic) telActTopic.publish(new ROSLIB.Message({ data: act }));
+  logSystem('teleop action → ' + act);
+}
+
+function telSetArmed(on) {
+  telArmed = on;
+  telReleaseAll();
+  $('telArm').classList.toggle('on', on);
+  $('telArm').textContent = on ? 'ARMED ⏎' : 'ARM ⏎';
+  $('telMeta').textContent = on ? 'ARMED' : 'DISARMED';
+  $('telMeta').style.color = on ? 'var(--good-txt)' : 'var(--muted)';
+  logSystem('teleop ' + (on ? 'ARMED — keyboard live' : 'disarmed'));
+}
+
+function telReleaseAll() {
+  for (const k of TEL_KEYS) telHeld[k] = false;
+  telHeld['shift'] = false;
+  telPaintKeys();
+}
+
+function telPaintKeys() {
+  document.querySelectorAll('.key[data-key]').forEach(el => {
+    el.classList.toggle('hot', telArmed && !!telHeld[el.dataset.key]);
+  });
+}
+
+function telSetMode(m) {
+  telMode = m;
+  document.querySelectorAll('#telMode button').forEach(b =>
+    b.classList.toggle('on', b.dataset.mode === m));
+}
+
+/* --- keyboard ------------------------------------------------------- */
+function telKeyName(ev) {
+  const k = ev.key;
+  if (k === 'Shift') return 'shift';
+  return k.length === 1 ? k.toLowerCase() : k;
+}
+
+window.addEventListener('keydown', (ev) => {
+  // Never hijack typing in a field.
+  const tag = (ev.target && ev.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || ev.target.isContentEditable) return;
+
+  const k = telKeyName(ev);
+
+  if (k === 'Enter') { telSetArmed(!telArmed); ev.preventDefault(); return; }
+  if (k === ' ') {                       // SPACE = E-STOP, armed or not
+    telEstop = true; telSetArmed(false); telAction('estop');
+    $('telEstop').classList.add('tripped');
+    ev.preventDefault(); return;
+  }
+  if (!telArmed) return;
+
+  if (k === '1') { telSetMode('precision'); ev.preventDefault(); return; }
+  if (k === '2') { telSetMode('normal');    ev.preventDefault(); return; }
+  if (k === '3') { telSetMode('boost');     ev.preventDefault(); return; }
+  if (k === 'h') { telAction('home');       ev.preventDefault(); return; }
+  if (k === 'n') { telLed = !telLed; telAction('led:' + (telLed ? 255 : 0)); ev.preventDefault(); return; }
+  if (k === 't') { telLimp = !telLimp; telAction(telLimp ? 'torque_off' : 'torque_on'); ev.preventDefault(); return; }
+  if (k === 'r') { telAction('reset_arm');  ev.preventDefault(); return; }
+
+  if (k === 'shift' || TEL_KEYS.includes(k)) {
+    telHeld[k] = true; telPaintKeys(); ev.preventDefault();
+  }
+});
+
+window.addEventListener('keyup', (ev) => {
+  const k = telKeyName(ev);
+  if (k === 'shift' || TEL_KEYS.includes(k)) { telHeld[k] = false; telPaintKeys(); }
+});
+
+// Losing focus must drop every key: otherwise a key held during an alt-tab
+// stays "down" forever and the robot keeps driving.
+window.addEventListener('blur', telReleaseAll);
+document.addEventListener('visibilitychange', () => { if (document.hidden) telReleaseAll(); });
+
+/* --- publish loop --------------------------------------------------- */
+const axis = (neg, pos) => (telHeld[pos] ? 1 : 0) - (telHeld[neg] ? 1 : 0);
+
+setInterval(() => {
+  if (!telArmed || telEstop) return;
+  const t = telTopics();
+  if (!t) return;
+  const msg = {
+    seq: ++telSeq,
+    mode: telHeld['shift'] ? 'precision' : telMode,
+    base: { vx: axis('s', 'w'), vy: axis('d', 'a'), wz: axis('e', 'q') },
+    arm:  { x: axis('k', 'i'), y: axis('l', 'j'), z: axis('o', 'u'),
+            grip: axis('[', ']') },
+  };
+  t.publish(new ROSLIB.Message({ data: JSON.stringify(msg) }));
+}, TEL_RATE_MS);
+
+/* --- buttons -------------------------------------------------------- */
+$('telArm').addEventListener('click', () => telSetArmed(!telArmed));
+$('telEstop').addEventListener('click', () => {
+  telEstop = true; telSetArmed(false); telAction('estop');
+  $('telEstop').classList.add('tripped');
+});
+document.querySelectorAll('#telMode button').forEach(b =>
+  b.addEventListener('click', () => telSetMode(b.dataset.mode)));
+document.querySelectorAll('.tel-aux button').forEach(b =>
+  b.addEventListener('click', () => {
+    const a = b.dataset.act;
+    if (a === 'clear_estop') { telEstop = false; $('telEstop').classList.remove('tripped'); }
+    if (a === 'led') { telLed = !telLed; telAction('led:' + (telLed ? 255 : 0)); return; }
+    telAction(a);
+  }));
+
+/* --- state HUD ------------------------------------------------------ */
+registerTopic({
+  name: '/teleop/state', type: 'std_msgs/String', throttle: 100,
+  handler: (m) => {
+    let s; try { s = JSON.parse(m.data); } catch (e) { return; }
+    const a = s.arm || {};
+    $('telX').textContent = fmt(a.x, 0);
+    $('telY').textContent = fmt(a.y, 0);
+    $('telZ').textContent = fmt(a.z, 0);
+    $('telG').textContent = fmt(a.t, 2);
+
+    const lk = $('telLink');
+    const stale = s.fb_age != null && s.fb_age > 1.5;
+    lk.textContent = 'LINK ' + String(s.link || '--').toUpperCase() +
+                     (s.fb_age != null ? ' · ' + fmt(s.fb_age, 1) + 's' : '');
+    lk.style.color = (s.link === 'ok' && !stale) ? 'var(--good-txt)'
+                   : (s.link === 'recovering' ? 'var(--warn-txt)' : 'var(--crit-txt)');
+
+    if (s.estop && !telEstop) { telEstop = true; $('telEstop').classList.add('tripped'); }
+
+    // Reach envelope: where the tool sits between r_min and r_max.
+    const lim = s.limits || {};
+    if (s.arm_r != null && lim.r_min != null) {
+      const span = Math.max(1, lim.r_max - lim.r_min);
+      const frac = Math.min(1, Math.max(0, (s.arm_r - lim.r_min) / span));
+      const fill = $('telRFill');
+      fill.style.left = '0%';
+      fill.style.width = (frac * 100).toFixed(1) + '%';
+      const near = frac < 0.06 || frac > 0.94;
+      fill.className = 'env-fill' + (near ? ' crit' : (frac < 0.15 || frac > 0.85 ? ' warn' : ''));
+      const blocked = (s.blocked && s.blocked.length) ? '  ⚠ ' + s.blocked.join(',') : '';
+      $('telREnv').textContent = 'r=' + fmt(s.arm_r, 0) + 'mm  [' +
+                                 fmt(lim.r_min, 0) + '–' + fmt(lim.r_max, 0) + ']' + blocked;
+      $('telREnv').style.color = blocked ? 'var(--crit-txt)' : 'var(--muted)';
+    }
+  }
+});
 
 /* ---------- boot ---------- */
 logSystem('SUDS mission control boot — target ' + WS_URL);

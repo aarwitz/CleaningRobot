@@ -38,6 +38,7 @@ echo "[entrypoint] - Network: ${NET_W:-640}x${NET_H:-640}"
 echo "[entrypoint] - Model: ${MODEL_FILE_PATH:-/models/yolov8s.onnx}"
 echo "[entrypoint] - Force Engine Rebuild: ${FORCE_ENGINE_UPDATE:-true}"
 echo "[entrypoint] - Arm Bridge: ${ENABLE_ARM:-true}"
+echo "[entrypoint] - Teleop: ${ENABLE_TELEOP:-false}"
 echo "[entrypoint] - IMU Fusion: ${ENABLE_IMU:-True}"
 echo "[entrypoint] - Camera FPS: ${CAMERA_FPS:-90}"
 echo "[entrypoint] - Nvblox 3D Mapping: ${ENABLE_NVBLOX:-false}"
@@ -88,6 +89,7 @@ exec ros2 launch robot_bringup robot_bringup.launch.py \
     enable_color:="${ENABLE_COLOR:-true}" \
     enable_depth:="${ENABLE_DEPTH:-true}" \
     enable_arm:="${ENABLE_ARM:-true}" \
+    enable_teleop:="${ENABLE_TELEOP:-false}" \
     enable_imu:="${ENABLE_IMU:-True}" \
     camera_fps:="${CAMERA_FPS:-90}" \
     enable_nvblox:="${ENABLE_NVBLOX:-true}" \

@@ -57,6 +57,11 @@ def generate_launch_description():
         'enable_arm', default_value='true',
         description='Enable Waveshare RoArm bridge node'
     )
+
+    enable_teleop_arg = DeclareLaunchArgument(
+        'enable_teleop', default_value='false',
+        description='Enable the operator teleop server (base + arm from the web UI)'
+    )
     
     enable_visualization_arg = DeclareLaunchArgument(
         'enable_visualization', default_value='true',
@@ -152,6 +157,7 @@ def generate_launch_description():
     enable_behavior = LaunchConfiguration('enable_behavior')
     enable_nav2 = LaunchConfiguration('enable_nav2')
     enable_arm = LaunchConfiguration('enable_arm')
+    enable_teleop = LaunchConfiguration('enable_teleop')
     enable_visualization = LaunchConfiguration('enable_visualization')
     enable_nvblox = LaunchConfiguration('enable_nvblox')
     cam_w = LaunchConfiguration('cam_w')
@@ -548,7 +554,12 @@ def generate_launch_description():
         # ever dies the whole drive train is gone — always come back.
         respawn=True,
         respawn_delay=5.0,
-        condition=IfCondition(enable_nav2)  # Only when Nav2 is enabled
+        # Needed by Nav2 OR by teleop. Teleop deliberately runs it WITHOUT
+        # Nav2, because the Nav2 servers publish /cmd_vel on their own and
+        # would fight the operator for the drive train.
+        condition=IfCondition(PythonExpression([
+            "'", enable_nav2, "' == 'true' or '", enable_teleop, "' == 'true'"
+        ]))
     )
     
     # 7. Arm bridge (Waveshare RoArm v2) – autonomous pick-and-place
@@ -572,7 +583,24 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(enable_arm)
     )
-    
+
+    # 7b. Teleop server — operator drives base + arm from the web UI.
+    # MUTUALLY EXCLUSIVE with arm_bridge: both own /dev/ttyUSB0, and
+    # arm_bridge respawns, so it must be off (ENABLE_ARM=false) for teleop.
+    teleop_node = Node(
+        package='robot_teleop',
+        executable='teleop_node',
+        name='teleop_node',
+        parameters=[{
+            'serial_port': '/dev/ttyUSB0',
+            'baud_rate': 115200,
+        }],
+        output='screen',
+        respawn=True,
+        respawn_delay=5.0,
+        condition=IfCondition(enable_teleop)
+    )
+
     # 7. Nav2 (optional, for full autonomy)
     nav2_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -646,6 +674,7 @@ def generate_launch_description():
         enable_behavior_arg,
         enable_nav2_arg,
         enable_arm_arg,
+        enable_teleop_arg,
         enable_visualization_arg,
         enable_nvblox_arg,
         cam_w_arg,
@@ -749,6 +778,7 @@ def generate_launch_description():
         behavior_manager_node,
         motor_controller_node,
         arm_bridge_node,
+        teleop_node,
         nav2_launch,
         robot_state_publisher_node,
         rosbridge_server,

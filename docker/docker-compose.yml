@@ -4,6 +4,11 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     image: vision_production:1.0
+    # Run the BIND-MOUNTED entrypoint, not the one COPY'd into the image at
+    # build time. Without this, editing scripts/entrypoint.sh silently does
+    # nothing until the image is rebuilt — the stale baked copy keeps running,
+    # which is exactly how a new launch argument can go missing (2026-07-22).
+    entrypoint: ["/scripts/entrypoint.sh"]
     runtime: nvidia
     privileged: true
     network_mode: host
@@ -34,17 +39,28 @@ services:
       NMS_TH: "0.5"
       NUM_CLASSES: "1"
       CAMERA_ONLY: "false"
-      ENABLE_SLAM: "true"
-      ENABLE_YOLO: "true"
+      # TELEOP RIG (2026-07-22): the operator drives base + arm from the web UI
+      # via robot_teleop, which owns /dev/ttyUSB0 exclusively.
+      #   ENABLE_ARM=false   arm_bridge would fight teleop for the serial port,
+      #                      and it respawns, so killing it is not enough.
+      #   ENABLE_NAV2=false  the Nav2 servers publish /cmd_vel autonomously and
+      #                      would fight the operator. ENABLE_TELEOP still
+      #                      brings up motor_controller on its own.
+      #   ENABLE_BEHAVIOR=false  the mission state machine also sends goals.
+      # SLAM / YOLO / nvblox stay off to free the GPU; teleop consumes only the
+      # color stream. Flip these back for autonomous missions.
+      ENABLE_TELEOP: "true"
+      ENABLE_SLAM: "false"
+      ENABLE_YOLO: "false"
       ALIGN_DEPTH: "true"
       ENABLE_DEPTH: "true"
       ENABLE_COLOR: "true"
-      ENABLE_ARM: "true"
+      ENABLE_ARM: "false"
       ENABLE_IMU: "true"
       CAMERA_FPS: "30"
       ENABLE_BEHAVIOR: "false"
-      ENABLE_NAV2: "true"
-      ENABLE_NVBLOX: "true"
+      ENABLE_NAV2: "false"
+      ENABLE_NVBLOX: "false"
       ENABLE_VISUALIZATION: "true"
       # CYCLONEDDS_URI: /root/.cyclonedds.xml
       # RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
