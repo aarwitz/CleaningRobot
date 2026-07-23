@@ -13,3 +13,7 @@ cleaned_log.txt
 # Python
 __pycache__/
 *.pyc
+
+# Generated policy datasets (large; rebuild from demos/)
+lerobot_sock_*/
+demos.tar

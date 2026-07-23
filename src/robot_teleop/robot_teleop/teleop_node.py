@@ -169,7 +169,10 @@ class TeleopNode(Node):
 
     def _action_cb(self, msg):
         act = msg.data.strip()
-        self.get_logger().info(f'action: {act}')
+        # goto arrives as a streamed setpoint train during scripted runs; logging
+        # every one of them at 10 Hz buries everything else in the log.
+        if not act.startswith('goto:'):
+            self.get_logger().info(f'action: {act}')
         if act == 'estop':
             self.estop = True
             self._all_stop()
@@ -202,6 +205,8 @@ class TeleopNode(Node):
             # "goto:x,y,z,t" — absolute placement for scripted setup moves.
             # Uses the non-blocking T:1041 and still respects the envelope, so
             # a bad number cannot drive the tool into the camera.
+            if self.estop:
+                return          # E-STOP must halt scripted motion, not just jogs
             try:
                 x, y, z, t = (float(v) for v in act.split(':', 1)[1].split(','))
             except Exception:
