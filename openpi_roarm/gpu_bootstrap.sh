@@ -17,6 +17,9 @@
 #
 # --train also kicks off training at the end instead of just printing the cmd.
 set -euo pipefail
+# Explicit failure marker: monitors must grep for "SETUP OK" / "BOOTSTRAP FAILED"
+# rather than inferring health from process liveness (which lies).
+trap 'echo "BOOTSTRAP FAILED (line $LINENO: $BASH_COMMAND)"' ERR
 
 SPACE=cartesian
 DEMOS=./demos
@@ -56,7 +59,9 @@ if [ ! -d "$DEMOS" ]; then
     if [ -d "$d/demos" ]; then DEMOS="$d/demos"; break; fi
     if [ -f "$d/demos.tar" ]; then
       say "unpacking $d/demos.tar"
-      tar -xf "$d/demos.tar" -C "$d"
+      # --no-same-owner: network volumes (e.g. RunPod /workspace on MooseFS)
+      # refuse chown even for root, and a failed chown fails tar entirely.
+      tar --no-same-owner -xf "$d/demos.tar" -C "$d"
       DEMOS="$d/demos"; break
     fi
   done
