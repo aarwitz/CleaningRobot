@@ -93,15 +93,22 @@ else
   echo "config block already present; skipping"
 fi
 
-# 3. build the LeRobot dataset
-say "building LeRobot dataset ($SPACE space) -> $REPO_ID"
-uv run python "$HERE/convert_roarm_to_lerobot.py" \
-    --demos "$DEMOS" --repo-id "$REPO_ID" --space "$SPACE" \
-    --prompt "pick up the sock"
+# 3. build the LeRobot dataset (skip if a previous run already built it)
+DS_DIR="$HOME/.cache/huggingface/lerobot/$REPO_ID"
+if [ -d "$DS_DIR/meta" ]; then
+  say "dataset $REPO_ID already exists at $DS_DIR -- skipping conversion"
+else
+  say "building LeRobot dataset ($SPACE space) -> $REPO_ID"
+  uv run python "$HERE/convert_roarm_to_lerobot.py" \
+      --demos "$DEMOS" --repo-id "$REPO_ID" --space "$SPACE" \
+      --prompt "pick up the sock"
+fi
 
 # 4. norm stats  (LOADS the config + dataset end to end == integration test)
 say "compute_norm_stats ($CONFIG) -- this validates the whole config/data path"
-uv run scripts/compute_norm_stats.py "$CONFIG"
+# tyro exposes the arg as either positional or --config-name depending on version
+uv run scripts/compute_norm_stats.py "$CONFIG" \
+  || uv run scripts/compute_norm_stats.py --config-name "$CONFIG"
 
 say "SETUP OK"
 cat <<EOF
