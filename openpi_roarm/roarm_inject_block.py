@@ -61,7 +61,10 @@ _ROARM_CONFIGS = [
         model=_roarm_lora_model(),
         data=RoarmDataConfig(
             repo_id=f"roarm_sock_{_sp}",
-            base_config=DataConfig(prompt_from_task=True),
+            # action_sequence_keys: openpi defaults to the libero-style column
+            # name ("actions",); our LeRobot dataset uses the standard "action".
+            base_config=DataConfig(prompt_from_task=True,
+                                   action_sequence_keys=("action",)),
         ),
         weight_loader=_rwl.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi0_base/params"),
