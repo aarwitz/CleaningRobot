@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
-"""Bridge between the robot's camera, the pi0.5 policy server on RSL, and the
+"""Bridge between the robot's camera/arm, an openpi policy server, and the
 operator console.
 
-Subscribes to the compressed color feed, and on request (or continuously)
-sends the latest frame + prompt to the openpi websocket policy server, then
-publishes the returned action chunk as JSON for the web UI.
+Two policy styles:
+  roarm (default) — our fine-tuned pi0 (see openpi_roarm/): sends the REAL
+      observation (camera frame + current cartesian arm state [x,y,z,grip]
+      from /teleop/state) and receives (horizon, 4) absolute cartesian
+      setpoints. In "execute" mode it streams them to the arm as `goto:`
+      actions on /teleop/action — the same channel the teleop console and
+      sock_cycle use, so teleop_node stays the single serial owner and the
+      browser E-STOP halts policy execution too.
+  droid — legacy smoke-test against the stock pi0.5-DROID server (zeroed
+      proprioception, 8-dim Franka actions). Inference only; never executed.
 
 Topics:
-  /pi/request  std_msgs/String  JSON {"prompt": str, "mode": "once"|"auto"|"stop",
-                                      "rate_hz": float (auto mode, default 0.5)}
-  /pi/result   std_msgs/String  JSON {ok, prompt, latency_ms, horizon, dims,
-                                      actions, error, server}
+  /pi/request  std_msgs/String JSON {"prompt": str,
+                                     "mode": "once"|"auto"|"execute"|"stop",
+                                     "rate_hz": float}   (auto-mode infer rate)
+  /pi/result   std_msgs/String JSON {ok, prompt, latency_ms, horizon, dims,
+                                     actions, executing, error, server}
+
+The policy server usually runs on the GPU box with only SSH exposed; tunnel it:
+  ssh -i ~/.ssh/runpod_ed25519 -p <pod-port> -N -L 8000:localhost:8000 root@<pod-ip>
+then run with server_host:=localhost.
 
 Run inside the container (needs: pip install msgpack websockets):
-  python3 scripts/pi_bridge.py --ros-args -p server_host:=RSL
+  python3 scripts/pi_bridge.py --ros-args -p server_host:=localhost
 """
 import functools
 import json
@@ -72,15 +84,23 @@ def resize_with_pad(img, h, w):
 class PiBridge(Node):
     def __init__(self):
         super().__init__('pi_bridge')
-        self.declare_parameter('server_host', 'RSL')
+        self.declare_parameter('server_host', 'localhost')
         self.declare_parameter('server_port', 8000)
         self.declare_parameter('camera_topic', '/camera/color/image_raw/compressed')
+        self.declare_parameter('policy_style', 'roarm')   # 'roarm' | 'droid'
+        self.declare_parameter('exec_rate_hz', 15.0)      # demo recording rate
+        self.declare_parameter('exec_steps', 25)          # chunk prefix to run
+                                                          # before re-planning
+        self.declare_parameter('state_max_age_s', 1.0)
         self.host = self.get_parameter('server_host').value
         self.port = self.get_parameter('server_port').value
+        self.style = self.get_parameter('policy_style').value
 
         self.latest_jpeg = None
+        self.teleop = None          # last /teleop/state dict
+        self.teleop_t = 0.0
         self.prompt = 'pick up the sock'
-        self.auto = False
+        self.mode = 'idle'          # idle | auto | execute
         self.rate_hz = 0.5
         self.ws = None
         self.lock = threading.Lock()
@@ -89,14 +109,24 @@ class PiBridge(Node):
         self.create_subscription(CompressedImage,
                                  self.get_parameter('camera_topic').value,
                                  self.on_image, 5)
+        self.create_subscription(String, '/teleop/state', self.on_teleop, 5)
         self.create_subscription(String, '/pi/request', self.on_request, 5)
         self.result_pub = self.create_publisher(String, '/pi/result', 5)
+        self.action_pub = self.create_publisher(String, '/teleop/action', 20)
 
         threading.Thread(target=self.worker, daemon=True).start()
-        self.get_logger().info(f'pi_bridge up; policy server ws://{self.host}:{self.port}')
+        self.get_logger().info(
+            f'pi_bridge up ({self.style}); server ws://{self.host}:{self.port}')
 
     def on_image(self, msg):
         self.latest_jpeg = bytes(msg.data)
+
+    def on_teleop(self, msg):
+        try:
+            self.teleop = json.loads(msg.data)
+            self.teleop_t = time.time()
+        except ValueError:
+            pass
 
     def on_request(self, msg):
         try:
@@ -107,11 +137,29 @@ class PiBridge(Node):
         self.prompt = req.get('prompt', self.prompt) or self.prompt
         mode = req.get('mode', 'once')
         self.rate_hz = float(req.get('rate_hz', self.rate_hz))
-        if mode == 'auto':
-            self.auto = True
+        if mode in ('auto', 'execute'):
+            self.mode = mode
         elif mode == 'stop':
-            self.auto = False
+            self.mode = 'idle'
         self.wake.set()
+
+    # ── robot state ─────────────────────────────────────────────────────────
+    def arm_state(self):
+        """Current cartesian arm state [x, y, z, grip], or None if stale/absent.
+        This is the REAL proprioception the fine-tuned policy was trained on —
+        never fabricate it; refuse to infer without it."""
+        if self.teleop is None:
+            return None
+        if time.time() - self.teleop_t > self.get_parameter('state_max_age_s').value:
+            return None
+        a = self.teleop.get('arm') or {}
+        vals = [a.get('x'), a.get('y'), a.get('z'), a.get('t')]
+        if any(v is None for v in vals):
+            return None
+        return np.asarray(vals, dtype=np.float32)
+
+    def estopped(self):
+        return bool((self.teleop or {}).get('estop'))
 
     # ── policy server client ────────────────────────────────────────────────
     def connect(self):
@@ -128,22 +176,38 @@ class PiBridge(Node):
             self.publish_error(f'server unreachable: {e}')
             return False
 
+    def build_obs(self, img):
+        if self.style == 'droid':
+            return {
+                'observation/exterior_image_1_left': resize_with_pad(img, 224, 224),
+                'observation/wrist_image_left': np.zeros((224, 224, 3), np.uint8),
+                'observation/joint_position': np.zeros(7),
+                'observation/gripper_position': np.zeros(1),
+                'prompt': self.prompt,
+            }
+        state = self.arm_state()
+        if state is None:
+            return None
+        return {
+            'observation/image': resize_with_pad(img, 224, 224),
+            'observation/state': state,
+            'prompt': self.prompt,
+        }
+
     def infer_once(self):
+        """One inference. Returns the (horizon, dims) action array or None."""
         if self.latest_jpeg is None:
             self.publish_error('no camera frame yet')
-            return
+            return None
         if not self.connect():
-            return
+            return None
         import cv2
         img = cv2.imdecode(np.frombuffer(self.latest_jpeg, np.uint8),
                            cv2.IMREAD_COLOR)[:, :, ::-1]  # BGR→RGB
-        obs = {
-            'observation/exterior_image_1_left': resize_with_pad(img, 224, 224),
-            'observation/wrist_image_left': np.zeros((224, 224, 3), np.uint8),
-            'observation/joint_position': np.zeros(7),
-            'observation/gripper_position': np.zeros(1),
-            'prompt': self.prompt,
-        }
+        obs = self.build_obs(img)
+        if obs is None:
+            self.publish_error('no fresh /teleop/state — is teleop_node up?')
+            return None
         t0 = time.time()
         try:
             self.ws.send(packb(obs))
@@ -154,7 +218,7 @@ class PiBridge(Node):
         except Exception as e:
             self.ws = None  # force reconnect next time
             self.publish_error(f'inference failed: {e}')
-            return
+            return None
         self.result_pub.publish(String(data=json.dumps({
             'ok': True,
             'prompt': self.prompt,
@@ -162,9 +226,33 @@ class PiBridge(Node):
             'horizon': int(actions.shape[0]),
             'dims': int(actions.shape[1]),
             'actions': np.round(actions, 4).tolist(),
+            'executing': self.mode == 'execute',
             'server': f'{self.host}:{self.port}',
             'ts': time.time(),
         })))
+        return actions
+
+    def execute_chunk(self, actions):
+        """Stream the first exec_steps actions to the arm as goto: setpoints.
+
+        Every safety property is inherited from teleop_node's goto handler:
+        E-STOP gating, workspace envelope clamp, single serial owner. This
+        method additionally stops on estop/stale-state and returns False so
+        the caller drops back to idle.
+        """
+        if self.style != 'roarm' or actions.shape[1] != 4:
+            self.publish_error(f'refusing to execute {actions.shape} actions '
+                               f'with style={self.style}')
+            return False
+        rate = self.get_parameter('exec_rate_hz').value
+        steps = min(int(self.get_parameter('exec_steps').value), len(actions))
+        for i in range(steps):
+            if self.mode != 'execute' or self.estopped() or self.arm_state() is None:
+                return False
+            x, y, z, t = (float(v) for v in actions[i])
+            self.action_pub.publish(String(data=f'goto:{x:.1f},{y:.1f},{z:.1f},{t:.3f}'))
+            time.sleep(1.0 / rate)
+        return True
 
     def publish_error(self, err):
         self.get_logger().warn(err)
@@ -177,12 +265,19 @@ class PiBridge(Node):
             triggered = self.wake.wait(timeout=0.2)
             if triggered:
                 self.wake.clear()
-                with self.lock:
-                    self.infer_once()
-            if self.auto:
+                if self.mode not in ('auto', 'execute'):
+                    with self.lock:
+                        self.infer_once()
+            if self.mode == 'auto':
                 with self.lock:
                     self.infer_once()
                 time.sleep(max(0.2, 1.0 / self.rate_hz))
+            elif self.mode == 'execute':
+                with self.lock:
+                    actions = self.infer_once()
+                    if actions is None or not self.execute_chunk(actions):
+                        self.mode = 'idle'   # any failure -> stop, loudly
+                # receding horizon: immediately re-infer from the new state
 
 
 def main():
