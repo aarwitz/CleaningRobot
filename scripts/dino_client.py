@@ -26,7 +26,9 @@ import urllib.request
 import uuid
 
 DEFAULT_URL = os.environ.get('DINO_URL', 'http://localhost:8002')
-KEY_PATH = os.path.expanduser('~/.dino_key')
+# Inside the robot container there is no ssh access to RSL; the key file is
+# staged there (docker cp) and found via DINO_KEY_PATH.
+KEY_PATH = os.path.expanduser(os.environ.get('DINO_KEY_PATH', '~/.dino_key'))
 
 # Sock-scene constraint set (tuned 2026-07-24 on live frames): the pick surface
 # occupies the lower ~60% of the image; a scrunched sock is ~6-20k px^2; the

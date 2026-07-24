@@ -35,7 +35,14 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 import rclpy
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import dino_client                    # GroundingDINO on RSL (via tunnel)
+except Exception:
+    dino_client = None
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -200,6 +207,48 @@ class Cycle(Node):
                 return True
         return False
 
+    # ── vision (GroundingDINO drift correction) ─────────────────────────────
+    OBSERVE = (255.0, 0.0)      # canonical observation pose (x, y); z from call
+
+    def observe_px(self, gz_hover, prompt=None, rec=None):
+        """Move to the canonical observation pose, then detect.
+
+        The camera CO-ROTATES with the arm base, so from a hover above the
+        object its lateral position is nearly unobservable (measured: 30 mm of
+        arm-y moved the detection 8 px). Detecting from one fixed base
+        rotation makes the px->mm map well-conditioned in both axes.
+        """
+        self.move(self.OBSERVE[0], self.OBSERVE[1], gz_hover, speed=120.0,
+                  rec=rec, phase='observe')
+        self.spin(0.5)          # let vibration settle for a sharp frame
+        return self.detect_px(prompt)
+
+    def detect_px(self, prompt=None, tries=2):
+        """Detect the object; return its bbox center (px) or None.
+
+        Uses the operator's GroundingSAM service with the reviewer-replacing
+        constraint set (ROI over the pick surface + area band). Top confidence
+        wins. ~0.4 s warm through the tunnel.
+        """
+        if dino_client is None or self.img is None:
+            return None
+        for _ in range(tries):
+            cv2.imwrite('/tmp/_dino_frame.png', self.img)
+            try:
+                if prompt:
+                    dets = dino_client.detect(
+                        '/tmp/_dino_frame.png', prompt,
+                        roi=dino_client.SOCK_ROI, area=dino_client.SOCK_AREA)
+                else:
+                    dets = dino_client.detect_sock('/tmp/_dino_frame.png')
+            except Exception as e:
+                print(f'  [vision] detect failed: {e}')
+                dets = []
+            if dets:
+                return dino_client.box_center(dets[0]['box'])
+            self.spin(0.4)      # fresh frame, retry once
+        return None
+
     def grip(self, target, secs=1.2, rec=None, phase=''):
         """Ramp the claw. Ramping (not snapping) keeps a light object from being
         batted away by the moving jaw before the other side closes on it."""
@@ -305,9 +354,61 @@ class Recorder:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
+class VisionCal:
+    """Pixel->arm-mm mapping, self-calibrated by the ARM (see --calibrate-vision):
+    the arm places the object at known points, the detector reports pixels, and
+    a 2x2 linear map A (d_mm = A @ d_px) falls out. No hand-eye transform, no
+    depth — corrections are RELATIVE to the last arm-verified placement, so
+    systematic calibration error cannot accumulate."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.A = None
+        self.ref_px = None      # detector center right after the last place
+        self.ref_mm = None      # where the arm placed the object (ground truth)
+        if self.path.exists():
+            d = json.loads(self.path.read_text())
+            self.A = np.array(d['A'])
+            print(f'  [vision] cal loaded: A={np.round(self.A,3).tolist()}')
+
+    def solve(self, mm_pts, px_pts):
+        d_mm = np.array([np.subtract(mm_pts[i], mm_pts[0]) for i in (1, 2)]).T
+        d_px = np.array([np.subtract(px_pts[i], px_pts[0]) for i in (1, 2)]).T
+        self.A = d_mm @ np.linalg.inv(d_px)
+        self.path.write_text(json.dumps({
+            'A': self.A.tolist(), 'mm_pts': mm_pts, 'px_pts': px_pts,
+            'ts': time.time()}))
+        print(f'  [vision] cal solved: A={np.round(self.A,3).tolist()} '
+              f'-> {self.path}')
+
+    def set_reference(self, mm, px):
+        self.ref_mm, self.ref_px = tuple(mm[:2]), tuple(px) if px else None
+
+    def correct(self, cur_px, max_mm=35.0, axes='y'):
+        """Corrected pick point from the current detection, or None.
+
+        axes='y' (default): correct only arm-y. Measured from the canonical
+        observe pose: arm-y is ~1.3 px/mm (strong, consistent across cals) but
+        arm-x is <0.4 px/mm — BELOW the bbox-center jitter a deformable sock
+        produces when re-placed, so the solved x-row is amplified noise. x is
+        left to chained arm ground truth + the torque-verified retry path.
+        """
+        if self.A is None or self.ref_px is None or cur_px is None:
+            return None
+        d = self.A @ (np.subtract(cur_px, self.ref_px))
+        if 'x' not in axes:
+            d[0] = 0.0
+        if np.hypot(*d) > max_mm:
+            print(f'  [vision] correction {np.round(d,1)} exceeds {max_mm}mm '
+                  '-- clamped')
+            d = d * (max_mm / np.hypot(*d))
+        return (self.ref_mm[0] + d[0], self.ref_mm[1] + d[1])
+
+
 def cycle(c, px, py, gz, hover, rec, place=None, settle_s=0.0,
           close_to=GRIP_CLOSED, approach_dy=55.0, overshoot=6.0,
-          close_start=0.12, z_blend=25.0, release_dy=8.0):
+          close_start=0.12, z_blend=25.0, release_dy=8.0,
+          max_retries=0, reacquire=None):
     """One sweep-in pick-and-place. Returns (ok, reason, torques, place_point).
 
     Pick uses the one-sided-claw sweep (see Cycle.sweep_in): descend to depth
@@ -322,34 +423,56 @@ def cycle(c, px, py, gz, hover, rec, place=None, settle_s=0.0,
     """
     place = place or (px, py)
     tor = {}
+    retries = 0
 
-    # Side approach: descend STRAIGHT down the +y side to just above the
-    # object's depth (gz + z_blend), then hand off to sweep_in, which folds the
-    # final z drop into the inward lateral move so it curves down-and-in as one
-    # arc. settle=False on both legs -> they flow continuously into the sweep.
-    c.move(px, py + approach_dy, gz + hover, GRIP_OPEN, speed=130.0,
-           settle=False, rec=rec, phase='approach')
-    c.move(px, py + approach_dy, gz + z_blend, speed=70.0,
-           settle=False, rec=rec, phase='descend')
-    if settle_s:
-        c.spin(settle_s)
-    c.sweep_in(px, py, gz, approach_dy, overshoot, close_to,
-               close_start=close_start, z_blend=z_blend, rec=rec, phase='grasp')
-    ok, th, ta, gap = c.held()
-    tor['close'] = {'torH': th, 't': round(ta, 3), 'gap': round(gap, 3)}
-    if not ok:
-        return False, f'empty sweep (torH {th}, claw {ta:.3f}, gap {gap:.3f})', tor, place
+    while True:
+        # Side approach: descend STRAIGHT down the +y side to just above the
+        # object's depth (gz + z_blend), then hand off to sweep_in, which folds
+        # the final z drop into the inward lateral move so it curves down-and-in
+        # as one arc. settle=False -> the legs flow continuously into the sweep.
+        c.move(px, py + approach_dy, gz + hover, GRIP_OPEN, speed=130.0,
+               settle=False, rec=rec, phase='approach')
+        c.move(px, py + approach_dy, gz + z_blend, speed=70.0,
+               settle=False, rec=rec, phase='descend')
+        if settle_s:
+            c.spin(settle_s)
+        c.sweep_in(px, py, gz, approach_dy, overshoot, close_to,
+                   close_start=close_start, z_blend=z_blend, rec=rec,
+                   phase='grasp')
+        ok, th, ta, gap = c.held()
+        tor['close'] = {'torH': th, 't': round(ta, 3), 'gap': round(gap, 3)}
+        if ok:
+            # Lift straight up (no radius change) to the top -- the clean,
+            # no-lean motion; gz + hover is the top.
+            c.move(px, py - overshoot, gz + hover, speed=90.0, settle=False,
+                   rec=rec, phase='lift')
+            ok, th, ta, gap = c.held()
+            tor['lift'] = {'torH': th, 't': round(ta, 3), 'gap': round(gap, 3)}
+        if ok:
+            break
 
-    # Lift straight up (no radius change) to the top -- this is the clean,
-    # no-lean motion. Pulling the radius IN would reach higher (~117 vs ~88 mm)
-    # but the in/out lean and the kink at the direction change read as "leaning"
-    # and "picking twice", so we stay at one radius. gz + hover is the top.
-    c.move(px, py - overshoot, gz + hover, speed=90.0, settle=False,
-           rec=rec, phase='lift')
-    ok, th, ta, gap = c.held()
-    tor['lift'] = {'torH': th, 't': round(ta, 3), 'gap': round(gap, 3)}
-    if not ok:
-        return False, f'dropped on lift (torH {th}, claw {ta:.3f}, gap {gap:.3f})', tor, place
+        # MISS. This is exactly the data the first fine-tune lacked — it froze
+        # at post-miss states because every failure was deleted — so the
+        # recovery is RECORDED as part of the episode: release, rise, re-locate
+        # the object, sweep again. A retried-then-successful episode is a
+        # demonstration of "grasp missed, fix it".
+        if retries >= max_retries:
+            return False, (f'miss after {retries} retries '
+                           f'(torH {th}, claw {ta:.3f}, gap {gap:.3f})'), tor, place
+        retries += 1
+        tor[f'miss_{retries}'] = {'torH': th, 't': round(ta, 3),
+                                  'gap': round(gap, 3)}
+        c.grip(GRIP_OPEN, secs=0.6, rec=rec, phase='recover')
+        c.move(px, py + approach_dy * 0.6, gz + hover, speed=100.0,
+               settle=False, rec=rec, phase='recover')
+        if reacquire is not None:
+            new_pt = reacquire()
+            if new_pt is not None:
+                print(f'  [retry {retries}] re-acquired object at '
+                      f'({new_pt[0]:.0f}, {new_pt[1]:.0f})')
+                px, py = new_pt
+                place = (px, py)
+    tor['retries'] = retries
 
     # Transit across at the top, then straight down to set down gently.
     c.move(place[0], place[1], gz + hover, speed=130.0, settle=False,
@@ -389,6 +512,18 @@ def main():
     ap.add_argument('--close-to', type=float, default=GRIP_CLOSED,
                     help='claw close target; below 3.14 squeezes a soft object '
                          'less and stops extruding it out of the jaws')
+    ap.add_argument('--vision', action='store_true',
+                    help='GroundingDINO drift correction: re-locate the object '
+                         'before every pick (needs the RSL tunnel up)')
+    ap.add_argument('--detect-prompt', type=str, default=None,
+                    help='detector prompt override (default: sock-tuned)')
+    ap.add_argument('--calibrate-vision', action='store_true',
+                    help='self-calibrate the px->mm map: the arm places the '
+                         'object at 3 known points and solves the 2x2 map from '
+                         'what the detector reports')
+    ap.add_argument('--max-retries', type=int, default=2,
+                    help='recorded miss-recovery attempts per episode (these '
+                         'become recovery demonstrations, not discards)')
     ap.add_argument('--test-grasp', action='store_true')
     ap.add_argument('--test-sweep', action='store_true')
     ap.add_argument('--approach-dy', type=float, default=55.0,
@@ -502,17 +637,74 @@ def main():
 
     root = Path(a.out)
     root.mkdir(parents=True, exist_ok=True)
+
+    # ── vision self-calibration: the arm IS the calibration rig ─────────────
+    if a.calibrate_vision:
+        cal = VisionCal(root / 'vision_cal.json')
+        # Targets step INWARD (-x) so nothing can leave the r<=R_MAX envelope:
+        # a silently clamped placement corrupts the mm ground truth and the
+        # solved map inherits the error (bitten once: +30mm targets from r~285
+        # landed at r>300 and the clamp shrank the true deltas by ~2x).
+        targets = [(px, py), (px - 30.0, py), (px - 30.0, py - 30.0)]
+        for t in targets[1:]:       # point 0 is detect-only, never placed
+            if math.hypot(*t) > R_MAX - 5:
+                print(f'cal target {t} too close to the r={R_MAX} envelope; '
+                      f'start from a more inward --pick')
+                return 2
+        mm_seen, px_seen = [], []
+        cur = (px, py)
+        for i, tgt in enumerate(targets):
+            if i > 0:       # move the object there with an un-recorded cycle
+                ok, why, tor, _ = cycle(
+                    c, cur[0], cur[1], a.grasp_z, a.hover, None, place=tgt,
+                    close_to=a.close_to, approach_dy=a.approach_dy,
+                    overshoot=a.overshoot, close_start=a.close_start,
+                    z_blend=a.z_blend, release_dy=a.release_dy, max_retries=1)
+                if not ok:
+                    print(f'calibration pick failed at {cur}: {why}'); return 2
+                cur = tgt
+            ctr = c.observe_px(a.grasp_z + a.hover, a.detect_prompt)
+            if ctr is None:
+                print(f'calibration: no detection at {tgt}'); return 2
+            print(f'  cal point {i}: arm ({tgt[0]:.0f},{tgt[1]:.0f}) '
+                  f'-> px ({ctr[0]:.0f},{ctr[1]:.0f})')
+            mm_seen.append(list(tgt)); px_seen.append(list(ctr))
+        cal.solve(mm_seen, px_seen)
+        print(f'object now at ({cur[0]:.0f},{cur[1]:.0f}); start collection '
+              f'with --pick {cur[0]:.0f},{cur[1]:.0f} --vision')
+        c.destroy_node(); rclpy.shutdown()
+        return 0
+
+    cal = None
+    if a.vision:
+        cal = VisionCal(root / 'vision_cal.json')
+        if cal.A is None:
+            print('no vision_cal.json -- run --calibrate-vision first')
+            return 2
+        cal.set_reference((px, py), c.observe_px(a.grasp_z + a.hover, a.detect_prompt))
+
+    def reacquire():
+        if cal is None:
+            return None
+        return cal.correct(c.observe_px(a.grasp_z + a.hover, a.detect_prompt))
+
     idx = a.start if a.start is not None else (
         1 + max([int(d.name[3:]) for d in root.glob('ep_*')] or [-1]))
 
-    ok_n = fail_n = 0
+    ok_n = fail_n = retry_ok_n = 0
     consec = 0
     cx0, cy0 = px, py            # original centre; jitter is bounded around it
     for k in range(a.episodes):
+        # Drift correction: trust the detector over dead-reckoned chaining.
+        if cal is not None:
+            corr = cal.correct(c.observe_px(a.grasp_z + a.hover, a.detect_prompt))
+            if corr is not None and math.hypot(corr[0]-px, corr[1]-py) > 4.0:
+                print(f'  [vision] pick ({px:.0f},{py:.0f}) -> '
+                      f'({corr[0]:.0f},{corr[1]:.0f})')
+                px, py = corr
         if a.jitter:
-            # Random WALK (place becomes next pick, no perception), but bounded
-            # to a box around the original centre so it cannot drift out of
-            # reach or out of frame over a long run.
+            # Random WALK (place becomes next pick), bounded to a box around
+            # the original centre so it cannot drift out of reach or frame.
             place = (clamp(px + random.uniform(-a.jitter, a.jitter),
                            cx0 - a.jitter_bound, cx0 + a.jitter_bound),
                      clamp(py + random.uniform(-a.jitter, a.jitter),
@@ -527,25 +719,38 @@ def main():
                                         overshoot=a.overshoot,
                                         close_start=a.close_start,
                                         z_blend=a.z_blend,
-                                        release_dy=a.release_dy)
+                                        release_dy=a.release_dy,
+                                        max_retries=a.max_retries,
+                                        reacquire=reacquire)
         except RuntimeError as e:
             rec.discard()
             print(f'ep {idx}: ABORT {e}')
             break
         if ok:
+            nret = tor.get('retries', 0)
             rec.finish(True, {'pick': [px, py, a.grasp_z],
                               'place': [place[0], place[1], a.grasp_z],
-                              'torque': tor})
+                              'torque': tor, 'retries': nret})
             ok_n += 1; consec = 0
-            print(f'ep {idx:4d}: OK   {rec.n:3d} frames  torH {tor}')
-            # The sock now lives where we put it -- chain forward, exactly as
-            # the grid collector does, so ground truth needs no perception.
+            retry_ok_n += (1 if nret else 0)
+            tag = f'OK+{nret}r' if nret else 'OK   '
+            print(f'ep {idx:4d}: {tag} {rec.n:3d} frames')
             px, py = place
             idx += 1
+            if cal is not None:
+                # re-anchor the reference on the arm-verified placement
+                cal.set_reference(place,
+                                  c.observe_px(a.grasp_z + a.hover,
+                                               a.detect_prompt))
         else:
-            rec.discard()
+            # KEEP failed episodes on disk (success=false): the converter's
+            # --successful-only excludes them from training, but they document
+            # the attempt and may become negative/recovery data later.
+            rec.finish(False, {'pick': [px, py, a.grasp_z], 'torque': tor,
+                               'failure': why})
             fail_n += 1; consec += 1
-            print(f'ep {idx:4d}: FAIL {why}  [discarded]')
+            print(f'ep {idx:4d}: FAIL {why}  [kept, success=false]')
+            idx += 1
             try:
                 c.grip(GRIP_OPEN, secs=0.6)
                 c.move(px, py, a.grasp_z + a.hover, speed=45.0)
@@ -553,12 +758,12 @@ def main():
                 print(f'  recovery aborted: {e}')
                 break
             if consec >= 3:
-                print('\n3 misses in a row -- the sock has almost certainly '
-                      'moved out from under the pick point. Stopping rather '
-                      'than flailing at empty air.')
+                print('\n3 failed episodes in a row -- object likely out of '
+                      'the workspace. Stopping rather than flailing.')
                 break
 
-    print(f'\n{ok_n} recorded, {fail_n} discarded -> {root}')
+    print(f'\n{ok_n} ok ({retry_ok_n} with recorded recoveries), '
+          f'{fail_n} failed-kept -> {root}')
     c.destroy_node()
     rclpy.shutdown()
     return 0
