@@ -92,6 +92,8 @@ class PiBridge(Node):
         self.declare_parameter('exec_steps', 25)          # chunk prefix to run
                                                           # before re-planning
         self.declare_parameter('state_max_age_s', 1.0)
+        self.declare_parameter('max_chunks', 12)  # execute auto-disarms after
+                                                  # this many chunks per arm
         self.host = self.get_parameter('server_host').value
         self.port = self.get_parameter('server_port').value
         self.style = self.get_parameter('policy_style').value
@@ -101,6 +103,7 @@ class PiBridge(Node):
         self.teleop_t = 0.0
         self.prompt = 'pick up the sock'
         self.mode = 'idle'          # idle | auto | execute
+        self.chunks_run = 0
         self.rate_hz = 0.5
         self.ws = None
         self.lock = threading.Lock()
@@ -139,8 +142,14 @@ class PiBridge(Node):
         self.rate_hz = float(req.get('rate_hz', self.rate_hz))
         if mode in ('auto', 'execute'):
             self.mode = mode
+            self.chunks_run = 0
         elif mode == 'stop':
             self.mode = 'idle'
+        # Every request and resulting mode is logged: a stop MUST be verifiable
+        # from the log and from /pi/result's 'mode' field, never assumed from
+        # the sender's side. (2026-07-24: an unverified stop left execute mode
+        # silently armed and the policy picked up the sock on its own.)
+        self.get_logger().info(f'request: {mode} -> mode={self.mode} prompt="{self.prompt}"')
         self.wake.set()
 
     # ── robot state ─────────────────────────────────────────────────────────
@@ -227,6 +236,7 @@ class PiBridge(Node):
             'dims': int(actions.shape[1]),
             'actions': np.round(actions, 4).tolist(),
             'executing': self.mode == 'execute',
+            'mode': self.mode,
             'server': f'{self.host}:{self.port}',
             'ts': time.time(),
         })))
@@ -273,10 +283,20 @@ class PiBridge(Node):
                     self.infer_once()
                 time.sleep(max(0.2, 1.0 / self.rate_hz))
             elif self.mode == 'execute':
+                if self.chunks_run >= int(self.get_parameter('max_chunks').value):
+                    self.get_logger().warn(
+                        f'execute auto-disarmed after {self.chunks_run} chunks '
+                        '(re-arm with another execute request)')
+                    self.mode = 'idle'
+                    continue
                 with self.lock:
                     actions = self.infer_once()
                     if actions is None or not self.execute_chunk(actions):
+                        self.get_logger().info('execute -> idle (failure/stop)')
                         self.mode = 'idle'   # any failure -> stop, loudly
+                    else:
+                        self.chunks_run += 1
+                        self.get_logger().info(f'chunk {self.chunks_run} done')
                 # receding horizon: immediately re-infer from the new state
 
 
