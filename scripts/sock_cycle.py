@@ -85,6 +85,14 @@ class Cycle(Node):
         # object slides out mid-lift. Grip commands must only ever come from
         # grip(); motion must hold this value untouched.
         self.grip_cmd = None
+        # Last COMMANDED (x, y, z): segments must chain from this, never from
+        # the measured pose. With settle=False the arm lags the command train
+        # by 50-80 mm at segment boundaries; anchoring a new segment at the
+        # measured pose commands the arm BACKWARD and re-ramps -- the visible
+        # "up, dip, up" at every lift->transit and release->retreat boundary
+        # (seen directly in traj.jsonl: lift ends cmd -36, transit starts
+        # cmd -82). Command continuity removes the dip; the lag stays smooth.
+        self.last_cmd = None
         self.create_subscription(String, '/teleop/state', self._st, 10)
         self.create_subscription(Image, '/camera/color/image_raw', self._im, 10)
         self.act = self.create_publisher(String, '/teleop/action', 10)
@@ -151,6 +159,7 @@ class Cycle(Node):
         m = String()
         m.data = f'goto:{x:.1f},{y:.1f},{z:.1f},{t:.3f}'
         self.act.publish(m)
+        self.last_cmd = (x, y, z)
         return (x, y, z, t)
 
     # ── motion ──────────────────────────────────────────────────────────────
@@ -172,7 +181,9 @@ class Cycle(Node):
         cur = self.pose()
         if cur is None:
             raise RuntimeError('no arm feedback')
-        x0, y0, z0, _ = cur
+        # chain from the last commanded setpoint (command continuity), falling
+        # back to the measured pose only on the first move of a session
+        x0, y0, z0 = self.last_cmd if self.last_cmd is not None else cur[:3]
         if self.grip_cmd is None:
             self.grip_cmd = cur[3]
         g0 = self.grip_cmd
@@ -253,7 +264,8 @@ class Cycle(Node):
         """Ramp the claw. Ramping (not snapping) keeps a light object from being
         batted away by the moving jaw before the other side closes on it."""
         p = self.pose()
-        x, y, z, meas = p
+        meas = p[3]
+        x, y, z = self.last_cmd if self.last_cmd is not None else p[:3]
         t0 = self.grip_cmd if self.grip_cmd is not None else meas
         steps = max(1, int(secs * RATE))
         for i in range(1, steps + 1):
