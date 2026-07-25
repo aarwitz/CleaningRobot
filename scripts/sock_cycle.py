@@ -63,9 +63,13 @@ GRIP_GAP_MIN = 0.03          # commanded-minus-measured that counts as "somethin
 EMPTY_TORH = 32
 
 # Envelope must match teleop_node's, or its clamp silently moves our target and
-# the recorded action stops matching what the arm did.
-R_MIN, R_MAX = 180.0, 300.0
+# the recorded action stops matching what the arm did. Updated 2026-07-25 to the
+# probed true envelope: box r 180..480 / z -200..320 PLUS the spherical
+# reach_max=505 measured from the shoulder (firmware IK NaNs past 518.9 with no
+# guard; teleop clamps at 505, so we must too).
+R_MIN, R_MAX = 180.0, 480.0
 Z_MIN, Z_MAX = -200.0, 320.0
+REACH_MAX = 505.0
 
 
 def clamp(v, lo, hi):
@@ -150,12 +154,15 @@ class Cycle(Node):
         return bool((self.state or {}).get('estop'))
 
     def send(self, x, y, z, t):
+        z = clamp(z, Z_MIN, Z_MAX)
         r = math.hypot(x, y)
         if r > 1e-6:
             rc = clamp(r, R_MIN, R_MAX)
+            # spherical reach clamp, matching teleop's (measured from shoulder)
+            if math.hypot(rc, z) > REACH_MAX:
+                rc = math.sqrt(max(0.0, REACH_MAX**2 - z*z))
             if abs(rc - r) > 0.5:
                 x, y = x * rc / r, y * rc / r
-        z = clamp(z, Z_MIN, Z_MAX)
         m = String()
         m.data = f'goto:{x:.1f},{y:.1f},{z:.1f},{t:.3f}'
         self.act.publish(m)
