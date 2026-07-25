@@ -90,7 +90,16 @@ class TeleopNode(Node):
         # which is mounted on the arm's own rotating base: a carried object at
         # small radius swings straight into the lens.
         p('r_min', 180.0)
-        p('r_max', 300.0)
+        p('r_max', 480.0)    # probed 2026-07-25: cartesian goto tracks to
+                             # r=484 @ z=30 and r=446 @ z=-90 (droop 2-10mm).
+                             # The REAL ceiling is reach_max below.
+        # Spherical reach limit, measured from the SHOULDER (the z origin of
+        # the arm frame). The firmware IK's elbow-straight singularity is at
+        # l2+l3 = 518.9mm and its T:1041 handler has NO NaN guard (verified in
+        # vendor source) — past the singularity acos() NaNs and garbage servo
+        # targets go on the wire. 505 keeps a margin.
+        p('reach_max', 505.0)
+
         p('z_min', -200.0)
         p('z_max', 320.0)
         p('limit_taper_mm', 30.0)    # slow down within this distance of a limit
@@ -221,12 +230,37 @@ class TeleopNode(Node):
                 self.get_logger().warn(f'goto clamped r {r:.0f} -> {r_c:.0f}')
             z = clamp(z, self.get_parameter('z_min').value,
                       self.get_parameter('z_max').value)
+            # Spherical clamp against the IK singularity (see reach_max):
+            # keep z, pull the radius in so hypot(r, z) stays inside.
+            reach = self.get_parameter('reach_max').value
+            r = math.hypot(x, y)
+            if r > 1e-6 and math.hypot(r, z) > reach:
+                r_c = math.sqrt(max(0.0, reach**2 - z*z))
+                self.get_logger().warn(
+                    f'goto clamped to reach sphere: r {r:.0f} -> {r_c:.0f} '
+                    f'at z {z:.0f}')
+                x, y = x * r_c / r, y * r_c / r
             self.arm.stop_all()
             self.arm.goto(x, y, z, t)
         elif act == 'grip_open':
             self._preset_grip(GRIP_OPEN)
         elif act == 'grip_close':
             self._preset_grip(GRIP_CLOSED)
+        elif act.startswith('raw:'):
+            # Diagnostic passthrough: "raw:{...}" sends the JSON verbatim to
+            # the firmware. E-STOP-gated like goto. Added 2026-07-25 while
+            # chasing the firmware's cartesian-mode reach ceiling (~r399 with
+            # the elbow pinned at pi/2) — joint-space probing needs T:101/102,
+            # which the cartesian teleop surface cannot express.
+            if self.estop:
+                return
+            try:
+                obj = json.loads(act[4:])
+            except Exception:
+                self.get_logger().error(f'bad raw: {act}')
+                return
+            self.get_logger().info(f'raw passthrough: T={obj.get("T")}')
+            self.arm._write(obj)
 
     def _preset_grip(self, t):
         fb = self.arm.last_fb
@@ -282,6 +316,20 @@ class TeleopNode(Node):
             sz = s
             if s <= 0.01:
                 self.blocked.append('z_min')
+        # Spherical reach taper (see reach_max param): distance from the
+        # shoulder must stay below the IK singularity. Only motion that grows
+        # that distance is tapered; retreating is always allowed.
+        reach = self.get_parameter('reach_max').value
+        lc = math.hypot(r, z)
+        if lc > 1e-6:
+            dr = (x * vx + y * vy) / r if r > 1e-6 else 0.0
+            dlc = (r * dr + z * vz) / lc
+            if dlc > 0:
+                s = clamp((reach - lc) / band, 0.0, 1.0)
+                if s < 1.0:
+                    sx, sy, sz = sx * s, sy * s, sz * s
+                    if s <= 0.01:
+                        self.blocked.append('reach_max')
         return sx, sy, sz
 
     # ── control ─────────────────────────────────────────────────────────
