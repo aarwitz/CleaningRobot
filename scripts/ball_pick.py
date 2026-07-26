@@ -42,7 +42,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dino_client
 from sock_cycle import Cycle, GRIP_OPEN, GRIP_CLOSED, clamp
 from cv_bridge import CvBridge
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
+from std_msgs.msg import String
 
 BALL_PROMPT = 'orange ball. rubber basketball. dog toy ball'
 BALL_R = 30.0                # mm, tiny basketball
@@ -70,6 +71,43 @@ class BallPick(Cycle):
                                  '/camera/aligned_depth_to_color/camera_info',
                                  self._k, 10)
 
+        # data-flywheel feed for the operator console: annotated frame +
+        # JSON meta showing exactly what is guiding the current pick
+        self.fw_img = self.create_publisher(CompressedImage,
+                                            '/flywheel/overlay', 2)
+        self.fw_meta = self.create_publisher(String, '/flywheel/meta', 2)
+
+    def publish_flywheel(self, frame, meta, box=None, pick_px=None):
+        """Annotate + publish what the pick pipeline sees/decides."""
+        try:
+            vis = frame.copy()
+            if box is not None:
+                x0, y0, x1, y1 = (int(v) for v in box)
+                cv2.rectangle(vis, (x0, y0), (x1, y1), (60, 220, 255), 2)
+                lbl = f"{meta.get('label', '?')} {meta.get('score', 0):.2f}"
+                cv2.putText(vis, lbl, (x0, max(14, y0 - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 220, 255), 1)
+                if meta.get('depth_mm'):
+                    cv2.putText(vis, f"{meta['depth_mm']:.0f}mm",
+                                (x0, min(474, y1 + 16)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                (80, 255, 120), 1)
+            if pick_px is not None:
+                u, v = int(pick_px[0]), int(pick_px[1])
+                cv2.drawMarker(vis, (u, v), (0, 90, 255),
+                               cv2.MARKER_CROSS, 22, 2)
+            m = CompressedImage()
+            m.format = 'jpeg'
+            m.data = cv2.imencode('.jpg', vis,
+                                  [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+            self.fw_img.publish(m)
+            s = String()
+            s.data = json.dumps({'ts': time.time(), **meta})
+            self.fw_meta.publish(s)
+            self.spin(0.05)
+        except Exception as e:
+            print(f'  [flywheel] publish failed: {e}')
+
     def _d(self, m):
         self.depth = self.br.imgmsg_to_cv2(m, 'passthrough')  # uint16 mm
 
@@ -88,6 +126,22 @@ class BallPick(Cycle):
         d = self.depth[max(0, v-win):v+win+1, max(0, u-win):u+win+1].astype(float)
         d = d[(d > 100) & (d < 4000)]
         return float(np.median(d)) if d.size else None
+
+    def depth_of_box(self, box):
+        """Depth of the OBJECT in a bbox: median of the NEAR cluster.
+
+        The rubber ball defeats the projector over ~90% of its surface, so a
+        plain window median at the center falls through the holes onto the
+        floor behind (measured: median 717 vs true surface 303). The valid
+        pixels split into two clean clusters (object / background); take the
+        near one."""
+        x0, y0, x1, y1 = (int(v) for v in box)
+        d = self.depth[max(0, y0):y1, max(0, x0):x1].astype(float)
+        d = d[(d > 100) & (d < 4000)]
+        if d.size < 20:
+            return None
+        near = d[d <= np.percentile(d, 50)]
+        return float(np.median(near))
 
     def backproject(self, u, v, depth_mm):
         fx, fy, cx, cy = self.K
@@ -113,24 +167,61 @@ class BallPick(Cycle):
             return None
         return floor_probe_z - float(np.median(samples))
 
+    def detect_orange_local(self):
+        """Tunnel-down fallback: HSV blob for the bright-orange rubber ball
+        (the only saturated-orange object on the pale wood floor). Returns a
+        DINO-shaped [x0,y0,x1,y1] box or None."""
+        hsv = cv2.cvtColor(self.img, cv2.COLOR_BGR2HSV)
+        # strict saturation first: sunlit warm wood floor passes loose
+        # thresholds and swallows the ball into one giant contour. Relax only
+        # if strict finds nothing (dim evening light).
+        for lo in ((4, 140, 70), (4, 80, 50)):
+            mask = cv2.inRange(hsv, lo, (25, 255, 255))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                                    np.ones((5, 5), np.uint8))
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+            best = None
+            for cn in cnts:
+                area = cv2.contourArea(cn)
+                if not (800 <= area <= 30000):
+                    continue
+                x, y, w, h = cv2.boundingRect(cn)
+                if not (0.6 <= w / max(h, 1) <= 1.7):    # ball-ish aspect
+                    continue
+                if best is None or area > best[0]:
+                    best = (area, [x, y, x + w, y + h])
+            if best:
+                return best[1]
+        return None
+
     def observe_ball(self, tx, ty):
-        """From the canonical pose: DINO + depth -> ball center in arm mm."""
+        """From the canonical pose: DINO (or local HSV fallback) + depth
+        near-cluster -> ball center in arm mm."""
         self.move(*OBSERVE, t=GRIP_CLOSED, speed=110.0)
         self.spin(0.6)
         cv2.imwrite('/tmp/_ball_frame.png', self.img)
-        dets = dino_client.detect('/tmp/_ball_frame.png', BALL_PROMPT,
-                                  confidence=0.25)
-        if not dets:
-            return None, 'no detection'
-        b = dets[0]['box']
+        b = None
+        try:
+            dets = dino_client.detect('/tmp/_ball_frame.png', BALL_PROMPT,
+                                      confidence=0.25)
+            if dets:
+                b = dets[0]['box']
+        except Exception as e:
+            print(f'  [vision] DINO unavailable ({type(e).__name__}); '
+                  'falling back to local HSV blob')
+        if b is None:
+            b = self.detect_orange_local()
+        if b is None:
+            return None, 'no detection (DINO and local)'
         u, v = int((b[0]+b[2])/2), int((b[1]+b[3])/2)
-        dm = self.depth_at(u, v)
+        dm = self.depth_of_box(b)
         if dm is None:
-            return None, f'no depth at px ({u},{v})'
+            return None, f'no depth in bbox at px ({u},{v})'
         rs = self.backproject(u, v, dm)
         tz = self.floor_tz(int(b[3]))
         if tz is None:
-            return None, 'no floor samples for TZ'
+            tz = 0.0        # z estimate unused for the pick; xy is what matters
         # depth hits the ball SURFACE; push to center along the (unit-ish) ray
         cx = (rs[2]*1000.0 + BALL_R) + tx
         cy = -rs[0]*1000.0 + ty
@@ -154,17 +245,30 @@ class BallPick(Cycle):
                 return p[2]
         return None
 
-    def cage_grasp(self, bx, by, close_secs=2.0):
-        """Offset cage: plate down the -y flank, slow close, slow lift."""
+    def cage_grasp(self, bx, by, close_secs=2.0, cage_z=None,
+                   close_to=GRIP_CLOSED):
+        """Offset cage: plate down the -y flank, slow close, slow lift.
+
+        cage_z is the wrist z for the close. The jaw-tip drop below the wrist
+        is POSTURE-DEPENDENT (measured: ~50mm at r=246, <14mm at r=210, ~25mm
+        at r=300), so the right cage_z is 'tips just off the floor' for the
+        ball's radius — default tuned for r~300."""
+        cz = cage_z if cage_z is not None else -185.0
         wx, wy = bx, by - PLATE_DY
-        self.move(wx, wy, CAGE_Z + 90.0, GRIP_OPEN, speed=100.0)
+        # rise straight up FIRST if we are low: no lateral motion at ball
+        # height, ever (a closed claw at floor level knocked the ball once)
+        p = self.pose()
+        if p and p[2] < cz + 60.0:
+            x0, y0 = self.last_cmd[:2] if self.last_cmd else p[:2]
+            self.move(x0, y0, cz + 100.0, speed=70.0)
+        self.move(wx, wy, cz + 100.0, GRIP_OPEN, speed=90.0)
         self.spin(0.2)
-        self.move(wx, wy, CAGE_Z, speed=35.0)
+        self.move(wx, wy, cz, speed=35.0)
         self.spin(0.3)
-        self.grip(GRIP_CLOSED, secs=close_secs)
+        self.grip(close_to, secs=close_secs)
         ok, th, ta, gap = self.held()
         print(f'  close: held={ok} torH={th} claw={ta:.3f} gap={gap:.3f}')
-        self.move(wx, wy, CAGE_Z + 130.0, speed=35.0)
+        self.move(wx, wy, cz + 130.0, speed=35.0)
         self.spin(0.5)
         ok2, th2, ta2, gap2 = self.held()
         print(f'  lift : held={ok2} torH={th2} claw={ta2:.3f} gap={gap2:.3f}')
@@ -191,6 +295,10 @@ def main():
     ap.add_argument('--pick', action='store_true')
     ap.add_argument('--keep', action='store_true', help='stay holding after pick')
     ap.add_argument('--observe-only', action='store_true')
+    ap.add_argument('--at', type=str, default=None,
+                    help='x,y manual ball position (skips depth localization; '
+                         'for balls inside the depth blind zone)')
+    ap.add_argument('--cage-z', type=float, default=-185.0)
     a = ap.parse_args()
 
     rclpy.init()
@@ -201,11 +309,15 @@ def main():
     tx, ty = load_cal()
     print(f'hand-eye TX={tx:.1f} TY={ty:.1f}')
 
-    est, why = c.observe_ball(tx, ty)
-    if est is None:
-        print(f'FAIL: {why}')
-        return 2
-    bx, by, bz = est
+    if a.at:
+        bx, by = (float(v) for v in a.at.split(','))
+        bz = None
+    else:
+        est, why = c.observe_ball(tx, ty)
+        if est is None:
+            print(f'FAIL: {why}')
+            return 2
+        bx, by, bz = est
 
     if a.observe_only:
         return 0
@@ -233,12 +345,12 @@ def main():
         return 0
 
     if a.pick:
-        ok = c.cage_grasp(bx, by)
+        ok = c.cage_grasp(bx, by, cage_z=a.cage_z)
         print(f'\n{"BALL PICK OK" if ok else "BALL PICK FAILED"}')
         if ok and not a.keep:
-            c.move(bx, by - PLATE_DY, CAGE_Z + 8.0, speed=40.0)
+            c.move(bx, by - PLATE_DY, a.cage_z + 8.0, speed=40.0)
             c.grip(GRIP_OPEN, secs=1.0)
-            c.move(bx, by - PLATE_DY, CAGE_Z + 90.0, speed=80.0)
+            c.move(bx, by - PLATE_DY, a.cage_z + 90.0, speed=80.0)
         c.destroy_node(); rclpy.shutdown()
         return 0 if ok else 2
 

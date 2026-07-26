@@ -121,6 +121,7 @@
 
   @media (min-width: 900px) {
     .p-cam    { grid-column: span 7; }
+    .p-fly    { grid-column: span 5; }
     .p-teleop { grid-column: span 5; }
     .p-nav    { grid-column: span 5; }
     .p-drive  { grid-column: span 4; }
@@ -130,6 +131,7 @@
   }
   @media (min-width: 1500px) {
     .p-cam    { grid-column: span 6; }
+    .p-fly    { grid-column: span 6; }
     .p-teleop { grid-column: span 6; }
     .p-nav    { grid-column: span 6; }
     .p-drive  { grid-column: span 3; }
@@ -412,6 +414,28 @@
         <div class="cam-target" id="camTarget">◈ TARGET LOCK</div>
       </div>
       <div class="nosig"><span>NO SIGNAL</span></div>
+    </div>
+  </section>
+
+  <!-- DATA FLYWHEEL -->
+  <section class="panel p-fly" id="panelFly">
+    <div class="panel-hd">Data Flywheel<span class="meta" id="flyMeta">no pick activity</span></div>
+    <div class="panel-bd">
+      <div class="cam-wrap">
+        <canvas id="flyCanvas" width="640" height="480"></canvas>
+        <div class="cam-hud">
+          <div>/flywheel/overlay — what is guiding the pick</div>
+          <div class="row2" id="flyHudStats">awaiting pick pipeline</div>
+        </div>
+      </div>
+      <div class="nav-read" style="margin-top:8px">
+        <div class="cell"><span class="k">LABEL / PROMPT</span><span id="flyLabel" class="cyan">--</span></div>
+        <div class="cell"><span class="k">SCORE</span><span id="flyScore">--</span></div>
+        <div class="cell"><span class="k">DEPTH</span><span id="flyDepth">--</span></div>
+        <div class="cell"><span class="k">PICK POINT (ARM MM)</span><span id="flyPick" class="amber">--</span></div>
+        <div class="cell"><span class="k">STAGE</span><span id="flyStage">--</span></div>
+        <div class="cell"><span class="k">RESULT</span><span id="flyResult">--</span></div>
+      </div>
     </div>
   </section>
 
@@ -778,6 +802,46 @@ function switchStream(key) {
 }
 document.querySelectorAll('#camSeg button').forEach(b =>
   b.addEventListener('click', () => switchStream(b.dataset.stream)));
+
+/* ---------- data flywheel: what is guiding the current pick ---------- */
+const flyMeter = new RateMeter();
+let flyBusy = false;
+registerTopic({
+  name: '/flywheel/overlay', type: 'sensor_msgs/CompressedImage',
+  handler: (msg) => {
+    flyMeter.tick();
+    if (flyBusy) return;
+    flyBusy = true;
+    const img = new Image();
+    img.onload = () => {
+      const cv = $('flyCanvas');
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      $('flyHudStats').textContent = 'frame ' + new Date().toLocaleTimeString();
+      flyBusy = false;
+    };
+    img.onerror = () => { flyBusy = false; };
+    img.src = 'data:image/jpeg;base64,' + msg.data;
+  },
+});
+registerTopic({
+  name: '/flywheel/meta', type: 'std_msgs/String',
+  handler: (msg) => {
+    let m = {};
+    try { m = JSON.parse(msg.data); } catch (e) { return; }
+    $('flyMeta').textContent = (m.stage || '--').toUpperCase();
+    if (m.label)  $('flyLabel').textContent = m.label + (m.prompt ? ' · "' + m.prompt + '"' : '');
+    $('flyScore').textContent = (m.score != null) ? m.score.toFixed(2) : '--';
+    $('flyDepth').textContent = (m.depth_mm != null)
+      ? m.depth_mm.toFixed(0) + ' mm (' + (m.valid_px || 0) + ' px)' : 'blind zone / probe';
+    if (m.pick_arm) $('flyPick').textContent = m.pick_arm.join(', ');
+    $('flyStage').textContent = m.stage || '--';
+    if (m.stage === 'result') {
+      $('flyResult').textContent = m.held ? 'HELD ✓ (stall ' + m.stall + ')' : 'MISS (stall ' + m.stall + ')';
+      $('flyResult').className = m.held ? 'cyan' : 'amber';
+      logSystem('flywheel: pick ' + (m.held ? 'HELD' : 'MISS') + ' stall=' + m.stall);
+    }
+  },
+});
 
 registerTopic({
   name: '/yolo/detections', type: 'vision_msgs/Detection2DArray',
