@@ -45,6 +45,7 @@ sock_cycle.GRIP_OPEN = 0.35
 import dino_client
 from ball_pick import BallPick, OBSERVE, load_cal
 from behavior_manager_interfaces.srv import DriveRelative
+from geometry_msgs.msg import Twist
 from sensor_msgs.msg import CompressedImage
 from sock_cycle import GRIP_CLOSED, Recorder
 
@@ -71,6 +72,35 @@ class PickPipeline(BallPick):
                                  self._w, 2)
         self.drv = self.create_client(DriveRelative,
                                       '/motor_controller/drive_relative')
+        self.cmd = self.create_publisher(Twist, '/cmd_vel', 10)
+
+    def hop(self, dx=0.0, dyaw=0.0, speed=0.14, yaw_speed=0.5):
+        """Open-loop timed /cmd_vel burst for staging — NO encoder reads.
+
+        DriveRelative's encoder read-between-bursts has hung the 0x34 board
+        off the I2C bus twice this session (needs a power cycle each time).
+        Staging hops are re-verified by the vision loop and the wrist refine
+        absorbs the ±15% open-loop error, so pure-write driving is the
+        reliable choice. Calibration from drive_open_loop.py (0.74 delivery)."""
+        def burst(vx, wz, secs):
+            m = Twist()
+            m.linear.x, m.angular.z = float(vx), float(wz)
+            t0 = time.time()
+            while time.time() - t0 < secs:
+                self.cmd.publish(m)
+                self.spin(1.0 / 20.0)
+            z = Twist()
+            for _ in range(8):
+                self.cmd.publish(z)
+                self.spin(1.0 / 20.0)
+        if abs(dyaw) > 0.02:
+            burst(0.0, yaw_speed * (1 if dyaw > 0 else -1),
+                  abs(dyaw) / yaw_speed)
+            self.spin(0.4)
+        if abs(dx) > 0.01:
+            burst(speed * (1 if dx > 0 else -1), 0.0,
+                  abs(dx) / (speed * 0.74))
+            self.spin(0.4)
 
     def _w(self, m):
         self.wrist = cv2.imdecode(np.frombuffer(m.data, np.uint8),
@@ -503,12 +533,9 @@ def main():
             # object inside the depth blind zone: tucked-arm backup, coarse
             # again from depth-valid range (the drive-back happens in the
             # normal staging block below)
-            print('  [coarse] blind -> tucked backup 0.18m')
+            print('  [coarse] blind -> tucked open-loop backup 0.18m')
             c.move(255, 0, 60, GRIP_CLOSED, speed=90.0)
-            fut = c.drv.call_async(DriveRelative.Request(
-                dx=-0.18, dy=0.0, dyaw=0.0))
-            while not fut.done():
-                c.spin(0.1)
+            c.hop(dx=-0.18)
             bx, by, why, _ = c.coarse(a.prompt)
         if why != 'ok':
             print(f'  no coarse target ({why})'
@@ -523,24 +550,12 @@ def main():
                       '--allow-drive is off. Stopping here per operator gate.')
                 return 3
             c.move(255, 0, 60, GRIP_CLOSED, speed=90.0)     # tuck
-            if abs(bearing) > 0.06:
-                fut = c.drv.call_async(DriveRelative.Request(
-                    dx=0.0, dy=0.0, dyaw=float(bearing)))
-                while not fut.done():
-                    c.spin(0.1)
             fwd = max(-0.05, min(0.40, (rng - PICK_R) / 1000.0))
-            if abs(fwd) > 0.015:
-                fut = c.drv.call_async(DriveRelative.Request(
-                    dx=float(fwd), dy=0.0, dyaw=0.0))
-                while not fut.done():
-                    c.spin(0.1)
-                r = fut.result()
-                if not r.success:
-                    print(f'  staging drive failed: {r.message}')
-                    return 3
-                rng -= r.actual_dx * 1000.0
-            bx, by = rng, 0.0
-            print(f'  [stage] target now ({bx:.0f},{by:.0f})')
+            c.hop(dx=fwd, dyaw=bearing if abs(bearing) > 0.06 else 0.0)
+            # open-loop: assume nominal; the wrist refine absorbs the error
+            bx, by = rng - fwd * 1000.0, 0.0
+            print(f'  [stage] open-loop hop done; nominal target '
+                  f'({bx:.0f},{by:.0f})')
 
         rec = DualRecorder(root, idx, f'pick up the {a.object}') \
             if a.record else None
