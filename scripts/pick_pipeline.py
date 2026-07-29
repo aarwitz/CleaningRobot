@@ -280,21 +280,23 @@ class PickPipeline(BallPick):
             cv2.imwrite('/tmp/_vwrist.png', self.wrist)
             try:
                 vw = dino_client.detect('/tmp/_vwrist.png', prompt,
-                                        confidence=0.35)
+                                        confidence=0.30)
                 vw = [d_ for d_ in vw if not self.is_claw_det(d_['box'])]
-                # the wrist cam looks DOWN at the floor: merely seeing the
-                # object proves nothing (operator-diagnosed false HELDs).
-                # It can only VETO: object clearly below the fingers = miss.
-                below = [d_ for d_ in vw
-                         if (d_['box'][1] + d_['box'][3]) / 2 > 340]
-                held_wrist = False if below else None
+                # From the HIGH verify pose the discrimination is easy: a
+                # held object is centimeters from the wrist lens (huge bbox);
+                # a miss shows distant floor (small/no detection). Area is
+                # the signal.
+                big = [d_ for d_ in vw
+                       if (d_['box'][2] - d_['box'][0]) *
+                          (d_['box'][3] - d_['box'][1]) > 18000]
+                held_wrist = bool(big)
             except Exception:
                 pass
-        # head camera is the judge; wrist can only veto
-        held = bool(held_head) and held_wrist is not False
+        # both cameras must agree when both have an opinion
+        votes = [x for x in (held_head, held_wrist) if x is not None]
+        held = bool(votes) and all(votes)
         print(f'  [verify] head floor-clear={held_head} '
-              f'wrist veto={"yes" if held_wrist is False else "no"} '
-              f'-> held={held}')
+              f'wrist holds-object={held_wrist} -> held={held}')
         self.publish_flywheel(
             self.img, {'stage': 'result', 'label': prompt.split('.')[0],
                        'held': held, 'verify_head': held_head,
@@ -346,15 +348,39 @@ def teach(c, a, root):
       - grasp z for this object <- the z the human chose
       - a recorded two-view episode (if --record), success-flagged
     A few of these across object poses bootstrap the autonomous flywheel."""
+    import threading
     p_strategy = STRATEGIES[a.strategy]
     n_ok = 0
     while True:
-        try:
-            input(f'\n[teach {a.object}] position the OPEN claw at a pick '
-                  'pose, press Enter to capture (Ctrl-C to finish): ')
-        except (KeyboardInterrupt, EOFError):
+        # record the HUMAN'S approach teleop as part of the demonstration:
+        # an input-listener thread lets the main thread keep spinning and
+        # capturing frames at ~5Hz while the operator positions the claw
+        rec = DualRecorder(root, 1 + max(
+            [int(q.name[3:]) for q in root.glob('ep_*')] or [-1]),
+            f'pick up the {a.object}') if a.record else None
+        done = {'enter': False, 'eof': False}
+
+        def _wait():
+            try:
+                input(f'\n[teach {a.object}] position the OPEN claw at a '
+                      'pick pose, press Enter to capture (Ctrl-C to finish): ')
+            except (KeyboardInterrupt, EOFError):
+                done['eof'] = True
+            done['enter'] = True
+
+        th = threading.Thread(target=_wait, daemon=True)
+        th.start()
+        while not done['enter']:
+            c.spin(0.2)
+            if rec:
+                p_ = c.pose()
+                if p_:
+                    rec.row(c, 'human_approach', tuple(p_[:3]) + (p_[3],))
+        if done['eof']:
+            if rec:
+                rec.discard()
             break
-        c.spin(0.5)
+        c.spin(0.3)
         pose = c.pose()
         print(f'  pose ({pose[0]:.0f},{pose[1]:.0f},{pose[2]:.0f}) '
               f'grip {pose[3]:.2f}')
@@ -381,9 +407,6 @@ def teach(c, a, root):
                                        box=b, pick_px=wrist_px, cam='wrist')
             except Exception as e:
                 print(f'  wrist detect failed: {e}')
-        rec = DualRecorder(root, 1 + max(
-            [int(q.name[3:]) for q in root.glob('ep_*')] or [-1]),
-            f'pick up the {a.object}') if a.record else None
         c.grip(p_strategy['secure'], secs=1.4, rec=rec, phase='grasp')
         c.move(pose[0], pose[1], pose[2] + 130.0, speed=30.0,
                rec=rec, phase='lift')
