@@ -56,8 +56,10 @@ ANCHOR_FILE = '/demos/wrist_anchor.json'
 
 STRATEGIES = {
     # gz: wrist z at close; soft piles sit higher than their contact point
+    # secure=3.14 for plush: fur slips and the material is all compressible
+    # slack (attempt-1 slip-out at 3.05); band compliance protects the servo
     'sweep': dict(gz=-172.0, approach_dy=60.0, overshoot=12.0,
-                  close_to=2.90, close_start=0.25, secure=3.05),
+                  close_to=2.95, close_start=0.25, secure=3.14),
     'cage':  dict(gz=-176.0, approach_dy=60.0, overshoot=14.0,
                   close_to=2.60, close_start=0.30, secure=2.95),
 }
@@ -235,10 +237,18 @@ class PickPipeline(BallPick):
                                    'box': [round(t) for t in wbox]},
                                   box=wbox, pick_px=(wu, wv), cam='wrist')
             return bx, by, (wu, wv)
-        # wrist cam rigid to EE: px offset -> arm offset, constant scale.
-        # Axes: wrist image x ~ arm -y, image y ~ arm +x (mount-verified).
-        dx_mm = (wv - anc['v']) * anc['mm_per_px']
-        dy_mm = -(wu - anc['u']) * anc['mm_per_px']
+        # wrist cam rigid to EE: px offset -> arm offset. Use the measured
+        # 2x2 Jacobian when calibrated (--calibrate-wrist); the hand-assumed
+        # axis mapping had the x sign backwards and corrected a far object
+        # NEARER (attempt-5 short pick, operator-diagnosed).
+        du, dv = wu - anc['u'], wv - anc['v']
+        if 'Jinv' in anc:
+            J = anc['Jinv']
+            dx_mm = J[0][0] * du + J[0][1] * dv
+            dy_mm = J[1][0] * du + J[1][1] * dv
+        else:
+            dx_mm = dv * anc['mm_per_px']
+            dy_mm = -du * anc['mm_per_px']
         n = math.hypot(dx_mm, dy_mm)
         if n > 45.0:
             dx_mm, dy_mm = dx_mm * 45.0 / n, dy_mm * 45.0 / n
@@ -471,6 +481,66 @@ def teach(c, a, root):
     print(f'\nteach session done: {n_ok} successful demos -> {BANK_FILE}')
 
 
+def calibrate_wrist(c, a):
+    """Empirical wrist px->mm Jacobian: from the pre-grasp hover, jog the EE
+    a known +/-25mm in arm x then y, DINO-track the object's pixel each time,
+    and solve [du,dv] = J @ [dx,dy]. Saves J^-1 into the anchor file. Kills
+    the assumed-axes sign errors for good."""
+    bx, by, why, _ = c.coarse(a.prompt)
+    if why != 'ok':
+        print(f'calibration needs a localizable object ({why})')
+        return 2
+    gz = STRATEGIES[a.strategy]['gz']
+    hover = gz + 130.0
+
+    def see(tag):
+        c.spin(0.8)
+        cv2.imwrite('/tmp/_calw.png', c.wrist)
+        try:
+            dets = dino_client.detect('/tmp/_calw.png', a.prompt,
+                                      confidence=0.30)
+            dets = [d_ for d_ in dets if not c.is_claw_det(d_['box'])]
+        except Exception as e:
+            print(f'  {tag}: detect failed {e}')
+            return None
+        if not dets:
+            print(f'  {tag}: no detection')
+            return None
+        b = dets[0]['box']
+        p = ((b[0]+b[2])/2, (b[1]+b[3])/2)
+        print(f'  {tag}: px ({p[0]:.0f},{p[1]:.0f})')
+        return p
+
+    c.move(bx, by, hover, t=WIDE, speed=90.0, grip_ramp=True)
+    p0 = see('center')
+    if p0 is None:
+        return 2
+    D = 25.0
+    c.move(bx + D, by, hover, speed=40.0)
+    px_ = see('+x')
+    c.move(bx, by, hover, speed=40.0)
+    c.move(bx, by + D, hover, speed=40.0)
+    py_ = see('+y')
+    c.move(bx, by, hover, speed=40.0)
+    if px_ is None or py_ is None:
+        return 2
+    # object pixel moves OPPOSITE to the EE, so J columns are negated deltas
+    ju = (-(px_[0]-p0[0])/D, -(py_[0]-p0[0])/D)
+    jv = (-(px_[1]-p0[1])/D, -(py_[1]-p0[1])/D)
+    det = ju[0]*jv[1] - ju[1]*jv[0]
+    if abs(det) < 1e-6:
+        print('degenerate Jacobian; aborting')
+        return 2
+    Jinv = [[jv[1]/det, -ju[1]/det], [-jv[0]/det, ju[0]/det]]
+    anc = load_anchor() or {'u': p0[0], 'v': p0[1], 'n': 0, 'mm_per_px': 0.55}
+    anc['Jinv'] = Jinv
+    anc['J'] = [[ju[0], ju[1]], [jv[0], jv[1]]]
+    Path(ANCHOR_FILE).write_text(json.dumps(anc))
+    print(f'Jacobian solved: J=[[{ju[0]:.2f},{ju[1]:.2f}],'
+          f'[{jv[0]:.2f},{jv[1]:.2f}]] px/mm -> saved with anchor')
+    return 0
+
+
 def load_anchor():
     p = Path(ANCHOR_FILE)
     if p.exists():
@@ -500,6 +570,10 @@ def main():
     ap.add_argument('--allow-drive', action='store_true',
                     help='permit tucked-arm encoder staging moves (operator '
                          'gate; default OFF)')
+    ap.add_argument('--calibrate-wrist', action='store_true',
+                    help='solve the wrist px->mm Jacobian empirically: hover '
+                         'over the object, jog the EE +/-25mm in x and y, '
+                         'track how its pixel moves')
     ap.add_argument('--teach', action='store_true',
                     help='human-in-the-loop pick-pose demos: operator '
                          'positions the open claw, system closes/lifts/'
@@ -515,6 +589,11 @@ def main():
     root = Path(a.out)
     if a.record:
         root.mkdir(parents=True, exist_ok=True)
+    if a.calibrate_wrist:
+        rc = calibrate_wrist(c, a)
+        c.destroy_node()
+        rclpy.shutdown()
+        return rc
     if a.teach:
         teach(c, a, root)
         c.destroy_node()
