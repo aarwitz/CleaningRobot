@@ -404,7 +404,6 @@
         <button data-stream="color" class="on">COLOR</button>
         <button data-stream="infra">INFRA-1</button>
         <button data-stream="depth">DEPTH</button>
-        <button data-stream="wrist">WRIST</button>
       </div>
       <div class="cam-wrap">
         <canvas id="camCanvas" width="640" height="480"></canvas>
@@ -418,24 +417,18 @@
     </div>
   </section>
 
-  <!-- DATA FLYWHEEL -->
-  <section class="panel p-fly" id="panelFly">
-    <div class="panel-hd">Data Flywheel<span class="meta" id="flyMeta">no pick activity</span></div>
+  <!-- WRIST CAMERA (always on; flywheel has its own page now) -->
+  <section class="panel p-fly" id="panelWrist">
+    <div class="panel-hd">Wrist Camera
+      <span class="meta"><a href="/flywheel.html" style="color:inherit">DATA FLYWHEEL PAGE →</a></span>
+    </div>
     <div class="panel-bd">
       <div class="cam-wrap">
-        <canvas id="flyCanvas" width="640" height="480"></canvas>
+        <canvas id="wristCanvas" width="640" height="480"></canvas>
         <div class="cam-hud">
-          <div>/flywheel/overlay — what is guiding the pick</div>
-          <div class="row2" id="flyHudStats">awaiting pick pipeline</div>
+          <div>/wrist_cam/image_raw/compressed — global shutter, EE-mounted</div>
+          <div class="row2" id="wristHudStats">awaiting frames</div>
         </div>
-      </div>
-      <div class="nav-read" style="margin-top:8px">
-        <div class="cell"><span class="k">LABEL / PROMPT</span><span id="flyLabel" class="cyan">--</span></div>
-        <div class="cell"><span class="k">SCORE</span><span id="flyScore">--</span></div>
-        <div class="cell"><span class="k">DEPTH</span><span id="flyDepth">--</span></div>
-        <div class="cell"><span class="k">PICK POINT (ARM MM)</span><span id="flyPick" class="amber">--</span></div>
-        <div class="cell"><span class="k">STAGE</span><span id="flyStage">--</span></div>
-        <div class="cell"><span class="k">RESULT</span><span id="flyResult">--</span></div>
       </div>
     </div>
   </section>
@@ -749,7 +742,6 @@ const STREAMS = {
   color: { topic: '/camera/color/image_raw/compressed',                label: 'COLOR' },
   infra: { topic: '/camera/infra1/image_rect_raw/compressed',          label: 'INFRA-1' },
   depth: { topic: '/camera/aligned_depth_to_color/image_raw/compressed', label: 'DEPTH (jpeg render)' },
-  wrist: { topic: '/wrist_cam/image_raw/compressed',                   label: 'WRIST (global shutter)' },
 };
 let activeStream = 'color';
 
@@ -805,23 +797,25 @@ function switchStream(key) {
 document.querySelectorAll('#camSeg button').forEach(b =>
   b.addEventListener('click', () => switchStream(b.dataset.stream)));
 
-/* ---------- data flywheel: what is guiding the current pick ---------- */
-const flyMeter = new RateMeter();
-let flyBusy = false;
+/* ---------- wrist camera: always-on panel (flywheel has its own page) --- */
+const wristMeter = new RateMeter();
+let wristBusy = false;
 registerTopic({
-  name: '/flywheel/overlay', type: 'sensor_msgs/CompressedImage',
+  name: '/wrist_cam/image_raw/compressed', type: 'sensor_msgs/CompressedImage',
+  throttle: 200,
   handler: (msg) => {
-    flyMeter.tick();
-    if (flyBusy) return;
-    flyBusy = true;
+    wristMeter.tick();
+    if (wristBusy) return;
+    wristBusy = true;
     const img = new Image();
     img.onload = () => {
-      const cv = $('flyCanvas');
+      const cv = $('wristCanvas');
       cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
-      $('flyHudStats').textContent = 'frame ' + new Date().toLocaleTimeString();
-      flyBusy = false;
+      $('wristHudStats').textContent =
+        wristMeter.hz.toFixed(1) + ' Hz · ' + new Date().toLocaleTimeString();
+      wristBusy = false;
     };
-    img.onerror = () => { flyBusy = false; };
+    img.onerror = () => { wristBusy = false; };
     img.src = 'data:image/jpeg;base64,' + msg.data;
   },
 });
@@ -830,17 +824,8 @@ registerTopic({
   handler: (msg) => {
     let m = {};
     try { m = JSON.parse(msg.data); } catch (e) { return; }
-    $('flyMeta').textContent = (m.stage || '--').toUpperCase();
-    if (m.label)  $('flyLabel').textContent = m.label + (m.prompt ? ' · "' + m.prompt + '"' : '');
-    $('flyScore').textContent = (m.score != null) ? m.score.toFixed(2) : '--';
-    $('flyDepth').textContent = (m.depth_mm != null)
-      ? m.depth_mm.toFixed(0) + ' mm (' + (m.valid_px || 0) + ' px)' : 'blind zone / probe';
-    if (m.pick_arm) $('flyPick').textContent = m.pick_arm.join(', ');
-    $('flyStage').textContent = m.stage || '--';
     if (m.stage === 'result') {
-      $('flyResult').textContent = m.held ? 'HELD ✓ (stall ' + m.stall + ')' : 'MISS (stall ' + m.stall + ')';
-      $('flyResult').className = m.held ? 'cyan' : 'amber';
-      logSystem('flywheel: pick ' + (m.held ? 'HELD' : 'MISS') + ' stall=' + m.stall);
+      logSystem('flywheel: pick ' + (m.held ? 'HELD' : 'MISS'));
     }
   },
 });

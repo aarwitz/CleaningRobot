@@ -72,13 +72,19 @@ class BallPick(Cycle):
                                  '/camera/aligned_depth_to_color/camera_info',
                                  self._k, 10)
 
-        # data-flywheel feed for the operator console: annotated frame +
-        # JSON meta showing exactly what is guiding the current pick
-        self.fw_img = self.create_publisher(CompressedImage,
-                                            '/flywheel/overlay', 2)
+        # data-flywheel feed for the operator console: annotated frames +
+        # JSON meta showing exactly what is guiding the current pick,
+        # published PER CAMERA so the flywheel page shows both sensors
+        self.fw_img = {
+            'head': self.create_publisher(CompressedImage,
+                                          '/flywheel/head/overlay', 2),
+            'wrist': self.create_publisher(CompressedImage,
+                                           '/flywheel/wrist/overlay', 2),
+        }
         self.fw_meta = self.create_publisher(String, '/flywheel/meta', 2)
 
-    def publish_flywheel(self, frame, meta, box=None, pick_px=None):
+    def publish_flywheel(self, frame, meta, box=None, pick_px=None,
+                         cam='head'):
         """Annotate + publish what the pick pipeline sees/decides."""
         try:
             vis = frame.copy()
@@ -101,9 +107,9 @@ class BallPick(Cycle):
             m.format = 'jpeg'
             m.data = cv2.imencode('.jpg', vis,
                                   [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
-            self.fw_img.publish(m)
+            self.fw_img.get(cam, self.fw_img['head']).publish(m)
             s = String()
-            s.data = json.dumps({'ts': time.time(), **meta})
+            s.data = json.dumps({'ts': time.time(), 'cam': cam, **meta})
             self.fw_meta.publish(s)
             self.spin(0.05)
         except Exception as e:

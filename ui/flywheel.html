@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SUDS — Data Flywheel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg-deep:#05080c; --bg:#080d13; --panel:#0b1219; --panel-2:#0d151e;
+    --line:#15222e; --line-hot:#1d3242; --cyan:#22d3ee; --cyan-mark:#0e7490;
+    --amber:#fbbf24; --muted:#4b6274; --text:#c3d3de;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text);
+         font-family:'SF Mono','Fira Code',ui-monospace,monospace;
+         padding:14px; min-height:100vh; }
+  header { display:flex; align-items:center; gap:14px; margin-bottom:12px; }
+  header h1 { font-size:15px; letter-spacing:4px; color:var(--cyan);
+              text-transform:uppercase; font-weight:600; }
+  header .lamp { width:9px; height:9px; border-radius:50%; background:#333; }
+  header .lamp.ok { background:var(--cyan); box-shadow:0 0 8px var(--cyan); }
+  header a { color:var(--muted); font-size:11px; letter-spacing:2px;
+             text-decoration:none; margin-left:auto; }
+  header a:hover { color:var(--cyan); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:1100px) { .grid { grid-template-columns:1fr; } }
+  .col { background:linear-gradient(180deg,var(--panel-2),var(--panel));
+         border:1px solid var(--line); border-radius:6px; padding:12px; }
+  .col h2 { font-size:11px; letter-spacing:3px; color:var(--cyan);
+            text-transform:uppercase; margin-bottom:8px; }
+  .col h2 .sub { color:var(--muted); letter-spacing:1px; margin-left:8px;
+                 text-transform:none; }
+  canvas { display:block; width:100%; background:var(--bg-deep);
+           border:1px solid var(--line); border-radius:4px; }
+  .cap { font-size:10px; color:var(--muted); letter-spacing:1px;
+         margin:4px 0 10px; }
+  .meta { display:grid; grid-template-columns:repeat(3,1fr); gap:6px;
+          margin-top:8px; font-size:11px; }
+  .meta .cell { background:var(--panel); border:1px solid var(--line);
+                border-radius:3px; padding:5px 8px; min-height:38px; }
+  .meta .k { font-size:9px; letter-spacing:1.5px; color:var(--muted);
+             display:block; }
+  .meta .wide { grid-column:span 3; }
+  .cyan { color:var(--cyan); } .amber { color:var(--amber); }
+  #log { margin-top:14px; background:var(--panel); border:1px solid var(--line);
+         border-radius:6px; padding:10px 12px; font-size:11px; height:140px;
+         overflow-y:auto; }
+  #log .t { color:var(--muted); margin-right:8px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="lamp" id="lamp"></span>
+  <h1>Data Flywheel</h1>
+  <a href="/index.html">← MAIN CONSOLE</a>
+</header>
+
+<div class="grid">
+  <div class="col">
+    <h2>Head · RealSense D455<span class="sub">live color</span></h2>
+    <canvas id="headLive" width="640" height="480"></canvas>
+    <div class="cap">/camera/color/image_raw/compressed</div>
+    <h2>Last inference<span class="sub" id="headWhen">--</span></h2>
+    <canvas id="headInf" width="640" height="480"></canvas>
+    <div class="cap">/flywheel/head/overlay — GroundingDINO box + depth + pick point</div>
+    <div class="meta">
+      <div class="cell wide"><span class="k">LABEL / PROMPT</span><span id="hLabel" class="cyan">--</span></div>
+      <div class="cell"><span class="k">SCORE</span><span id="hScore">--</span></div>
+      <div class="cell"><span class="k">DEPTH</span><span id="hDepth">--</span></div>
+      <div class="cell"><span class="k">PICK (ARM MM)</span><span id="hPick" class="amber">--</span></div>
+      <div class="cell"><span class="k">STAGE</span><span id="hStage">--</span></div>
+      <div class="cell wide"><span class="k">RESULT</span><span id="hResult">--</span></div>
+    </div>
+  </div>
+
+  <div class="col">
+    <h2>Wrist · Global Shutter<span class="sub">live</span></h2>
+    <canvas id="wristLive" width="640" height="480"></canvas>
+    <div class="cap">/wrist_cam/image_raw/compressed — fingers visible: grip state readable</div>
+    <h2>Last inference<span class="sub" id="wristWhen">--</span></h2>
+    <canvas id="wristInf" width="640" height="480"></canvas>
+    <div class="cap">/flywheel/wrist/overlay — DINO box vs grasp anchor</div>
+    <div class="meta">
+      <div class="cell wide"><span class="k">LABEL</span><span id="wLabel" class="cyan">--</span></div>
+      <div class="cell"><span class="k">SCORE</span><span id="wScore">--</span></div>
+      <div class="cell"><span class="k">STAGE</span><span id="wStage">--</span></div>
+      <div class="cell"><span class="k">CORRECTED PICK</span><span id="wPick" class="amber">--</span></div>
+    </div>
+  </div>
+</div>
+
+<div id="log"></div>
+
+<script src="roslib.min.js"></script>
+<script>
+const WS_URL = 'ws://' + location.hostname + ':9090';
+const $ = id => document.getElementById(id);
+function log(msg) {
+  const d = document.createElement('div');
+  d.innerHTML = '<span class="t">' + new Date().toLocaleTimeString() + '</span>' + msg;
+  $('log').prepend(d);
+  while ($('log').children.length > 80) $('log').lastChild.remove();
+}
+function drawTo(canvasId, whenId) {
+  let busy = false;
+  return msg => {
+    if (busy) return;
+    busy = true;
+    const img = new Image();
+    img.onload = () => {
+      const cv = $(canvasId);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      if (whenId) $(whenId).textContent = new Date().toLocaleTimeString();
+      busy = false;
+    };
+    img.onerror = () => { busy = false; };
+    img.src = 'data:image/jpeg;base64,' + msg.data;
+  };
+}
+let ros = null;
+function connect() {
+  ros = new ROSLIB.Ros({ url: WS_URL });
+  ros.on('connection', () => {
+    $('lamp').className = 'lamp ok';
+    log('uplink established');
+    const sub = (name, type, throttle, handler) =>
+      new ROSLIB.Topic({ ros, name, messageType: type,
+                         throttle_rate: throttle }).subscribe(handler);
+    sub('/camera/color/image_raw/compressed', 'sensor_msgs/CompressedImage',
+        250, drawTo('headLive'));
+    sub('/wrist_cam/image_raw/compressed', 'sensor_msgs/CompressedImage',
+        200, drawTo('wristLive'));
+    sub('/flywheel/head/overlay', 'sensor_msgs/CompressedImage',
+        0, drawTo('headInf', 'headWhen'));
+    sub('/flywheel/wrist/overlay', 'sensor_msgs/CompressedImage',
+        0, drawTo('wristInf', 'wristWhen'));
+    sub('/flywheel/meta', 'std_msgs/String', 0, msg => {
+      let m = {};
+      try { m = JSON.parse(msg.data); } catch (e) { return; }
+      const head = (m.cam || 'head') === 'head';
+      if (head) {
+        if (m.label) $('hLabel').textContent =
+          m.label + (m.prompt ? ' · "' + m.prompt + '"' : '');
+        $('hScore').textContent = m.score != null ? m.score.toFixed(2) : '--';
+        $('hDepth').textContent = m.depth_mm != null
+          ? m.depth_mm.toFixed(0) + ' mm (' + (m.valid_px || 0) + 'px)' : '--';
+        if (m.pick_arm) $('hPick').textContent = m.pick_arm.join(', ');
+        $('hStage').textContent = m.stage || '--';
+        if (m.stage === 'result') {
+          $('hResult').textContent = (m.held ? 'HELD ✓' : 'MISS')
+            + '  head:' + m.verify_head + ' wrist:' + m.verify_wrist;
+          $('hResult').className = m.held ? 'cyan' : 'amber';
+          log('pick ' + (m.held ? '<span class="cyan">HELD</span>'
+                                : '<span class="amber">MISS</span>'));
+        }
+      } else {
+        if (m.label) $('wLabel').textContent = m.label;
+        $('wScore').textContent = m.score != null ? m.score.toFixed(2) : '--';
+        $('wStage').textContent = m.stage || '--';
+        if (m.pick_arm) $('wPick').textContent = m.pick_arm.join(', ');
+      }
+      log((m.cam || 'head') + ': ' + (m.stage || '?'));
+    });
+  });
+  ros.on('close', () => {
+    $('lamp').className = 'lamp';
+    setTimeout(connect, 1500);
+  });
+  ros.on('error', () => {});
+}
+connect();
+</script>
+</body>
+</html>
