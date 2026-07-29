@@ -245,6 +245,12 @@ class PickPipeline(BallPick):
                   rec=rec, phase='lift')
         self.move(bx, by - p['overshoot'], gz + 130.0, speed=30.0,
                   rec=rec, phase='lift')
+        # verify pose: HIGH and pulled in. At gz+130 a held object hangs at
+        # the head camera's own height and appears mid-frame -- right in the
+        # floor band -- flagging every good pick as a miss (operator-caught
+        # in the first teach session). Up high, held object and floor cannot
+        # overlap in the image.
+        self.move(270.0, 0.0, 90.0, speed=45.0, rec=rec, phase='verify_pose')
         self.spin(0.8)
         return True
 
@@ -259,7 +265,7 @@ class PickPipeline(BallPick):
             v = dino_client.detect('/tmp/_vhead.png', prompt,
                                    confidence=0.25, roi=ROI)
             floor = [dv for dv in v
-                     if (dv['box'][1] + dv['box'][3]) / 2 > 300]
+                     if (dv['box'][1] + dv['box'][3]) / 2 > 330]
             if pick_xy is not None and floor and self.K:
                 fx, _, cx, _ = self.K
                 bx_, by_ = pick_xy
@@ -381,8 +387,14 @@ def teach(c, a, root):
         c.grip(p_strategy['secure'], secs=1.4, rec=rec, phase='grasp')
         c.move(pose[0], pose[1], pose[2] + 130.0, speed=30.0,
                rec=rec, phase='lift')
+        # high verify pose: held object at gz+130 sits at head-camera height
+        # and lands in the floor band (false MISS on real picks)
+        c.move(270.0, 0.0, 90.0, speed=45.0, rec=rec, phase='verify_pose')
         c.spin(0.8)
         held = c.verify(a.prompt, pick_xy=(pose[0], pose[1]))
+        if held:
+            # return to the taught spot to set it down where it was picked
+            c.move(pose[0], pose[1], pose[2] + 120.0, speed=60.0)
         if rec:
             rec.finish(held, {'object': a.object, 'taught': True,
                               'pose': list(pose), 'held': held})
