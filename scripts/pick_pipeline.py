@@ -76,6 +76,34 @@ class PickPipeline(BallPick):
         self.wrist = cv2.imdecode(np.frombuffer(m.data, np.uint8),
                                   cv2.IMREAD_COLOR)
 
+    # ── LED: off by default; the full-brightness LED at close range blows
+    # out the wrist image (operator-observed). Auto-on DIM only when the
+    # wrist frame is actually dark, stepped, and off again when bright. ──
+    def set_led(self, val):
+        if getattr(self, '_led', None) == val:
+            return
+        from std_msgs.msg import String as _S
+        m = _S()
+        m.data = f'led:{val}'
+        self.act.publish(m)
+        self._led = val
+        print(f'  [light] led -> {val}')
+
+    def ensure_light(self):
+        if self.wrist is None:
+            return
+        mean = float(np.mean(cv2.cvtColor(self.wrist, cv2.COLOR_BGR2GRAY)))
+        led = getattr(self, '_led', 0) or 0
+        if mean < 45.0 and led == 0:
+            self.set_led(70)
+            self.spin(0.6)
+        elif mean < 40.0 and led == 70:
+            self.set_led(140)
+            self.spin(0.6)
+        elif mean > 110.0 and led > 0:
+            self.set_led(0)
+            self.spin(0.3)
+
     # ── coarse: head cam + depth ────────────────────────────────────────────
     def coarse(self, prompt):
         """(x, y, status, u): 3D target in arm mm from head cam, with the
@@ -117,6 +145,28 @@ class PickPipeline(BallPick):
             box=box, pick_px=(u, int((y0 + y1) / 2)))
         return bx, by, 'ok', u
 
+    def is_claw_det(self, box):
+        """The claw's own fingers get detected as objects (seen: 'white
+        fluffy rabbit toy' 0.39 on the black finger). The fingers live in a
+        fixed region of the wrist image AND are near-black; both together =
+        reject."""
+        if self.wrist is None:
+            return False
+        u = (box[0] + box[2]) / 2
+        v = (box[1] + box[3]) / 2
+        in_claw_zone = 40 < u < 470 and v > 300
+        if not in_claw_zone:
+            return False
+        x0, y0, x1, y1 = (max(0, int(t)) for t in box)
+        patch = self.wrist[y0:y1, x0:x1]
+        if patch.size == 0:
+            return False
+        dark = float(np.mean(cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY))) < 70.0
+        if dark:
+            print(f'  [wrist] rejecting claw self-detection at '
+                  f'({u:.0f},{v:.0f})')
+        return dark
+
     # ── refine: wrist cam from the pre-grasp hover ──────────────────────────
     def refine(self, bx, by, prompt, gz):
         """Hover above the coarse target, detect in the WRIST frame, correct
@@ -127,10 +177,12 @@ class PickPipeline(BallPick):
         if self.wrist is None:
             print('  [refine] no wrist frames -- skipping')
             return bx, by, None
+        self.ensure_light()
         cv2.imwrite('/tmp/_wrist.png', self.wrist)
         try:
             dets = dino_client.detect('/tmp/_wrist.png', prompt,
-                                      confidence=0.25)
+                                      confidence=0.35)
+            dets = [d_ for d_ in dets if not self.is_claw_det(d_['box'])]
         except Exception:
             dets = []
         if not dets:
@@ -197,7 +249,10 @@ class PickPipeline(BallPick):
         return True
 
     # ── verify: both cameras, vision only ───────────────────────────────────
-    def verify(self, prompt):
+    def verify(self, prompt, pick_xy=None):
+        """pick_xy restricts the head floor-check to the pick's own bearing:
+        other same-class objects in the scene (a second plush) must not
+        false-flag 'still on the floor'."""
         held_head = held_wrist = None
         cv2.imwrite('/tmp/_vhead.png', self.img)
         try:
@@ -205,6 +260,13 @@ class PickPipeline(BallPick):
                                    confidence=0.25, roi=ROI)
             floor = [dv for dv in v
                      if (dv['box'][1] + dv['box'][3]) / 2 > 300]
+            if pick_xy is not None and floor and self.K:
+                fx, _, cx, _ = self.K
+                bx_, by_ = pick_xy
+                u_pred = cx - fx * (by_ / max(bx_, 1.0))
+                floor = [dv for dv in floor
+                         if abs((dv['box'][0] + dv['box'][2]) / 2 - u_pred)
+                         < 100]
             held_head = not floor
         except Exception:
             pass
@@ -212,14 +274,21 @@ class PickPipeline(BallPick):
             cv2.imwrite('/tmp/_vwrist.png', self.wrist)
             try:
                 vw = dino_client.detect('/tmp/_vwrist.png', prompt,
-                                        confidence=0.25)
-                held_wrist = bool(vw)
+                                        confidence=0.35)
+                vw = [d_ for d_ in vw if not self.is_claw_det(d_['box'])]
+                # the wrist cam looks DOWN at the floor: merely seeing the
+                # object proves nothing (operator-diagnosed false HELDs).
+                # It can only VETO: object clearly below the fingers = miss.
+                below = [d_ for d_ in vw
+                         if (d_['box'][1] + d_['box'][3]) / 2 > 340]
+                held_wrist = False if below else None
             except Exception:
                 pass
-        votes = [x for x in (held_head, held_wrist) if x is not None]
-        held = bool(votes) and any(votes)
+        # head camera is the judge; wrist can only veto
+        held = bool(held_head) and held_wrist is not False
         print(f'  [verify] head floor-clear={held_head} '
-              f'wrist sees-object={held_wrist} -> held={held}')
+              f'wrist veto={"yes" if held_wrist is False else "no"} '
+              f'-> held={held}')
         self.publish_flywheel(
             self.img, {'stage': 'result', 'label': prompt.split('.')[0],
                        'held': held, 'verify_head': held_head,
@@ -239,6 +308,102 @@ class DualRecorder(Recorder):
             cv2.imwrite(str(self.dir / 'frames_wrist' / f'{self.n:04d}.jpg'),
                         c.wrist, [cv2.IMWRITE_JPEG_QUALITY, 85])
         super().row(c, phase, target)
+
+
+BANK_FILE = '/demos/pick_pose_bank.json'
+
+
+def load_bank():
+    p = Path(BANK_FILE)
+    return json.loads(p.read_text()) if p.exists() else []
+
+
+def taught_gz(obj, default):
+    """Median grasp z the HUMAN chose for this object, if taught."""
+    zs = [e['pose'][2] for e in load_bank()
+          if e['object'] == obj and e.get('success')]
+    if zs:
+        gz = float(np.median(zs))
+        print(f'  [bank] using taught gz {gz:.0f} '
+              f'({len(zs)} human demos) instead of default {default:.0f}')
+        return gz
+    return default
+
+
+def teach(c, a, root):
+    """Human-in-the-loop pick-pose demos: the operator teleops the OPEN claw
+    into a valid pick pose (web console; e-stop live). On Enter the system
+    captures the true pose + what both cameras see, CLOSES, lifts, verifies,
+    and learns from it:
+      - wrist anchor <- the object's wrist pixel at a HUMAN-vouched grasp
+        pose (gold sample; no correction ambiguity)
+      - grasp z for this object <- the z the human chose
+      - a recorded two-view episode (if --record), success-flagged
+    A few of these across object poses bootstrap the autonomous flywheel."""
+    p_strategy = STRATEGIES[a.strategy]
+    n_ok = 0
+    while True:
+        try:
+            input(f'\n[teach {a.object}] position the OPEN claw at a pick '
+                  'pose, press Enter to capture (Ctrl-C to finish): ')
+        except (KeyboardInterrupt, EOFError):
+            break
+        c.spin(0.5)
+        pose = c.pose()
+        print(f'  pose ({pose[0]:.0f},{pose[1]:.0f},{pose[2]:.0f}) '
+              f'grip {pose[3]:.2f}')
+        c.last_cmd = tuple(pose[:3])
+        c.grip_cmd = pose[3]
+        wrist_px = None
+        if c.wrist is not None:
+            c.ensure_light()
+            cv2.imwrite('/tmp/_teach_wrist.png', c.wrist)
+            try:
+                dets = dino_client.detect('/tmp/_teach_wrist.png', a.prompt,
+                                          confidence=0.30)
+                dets = [d_ for d_ in dets if not c.is_claw_det(d_['box'])]
+                if dets:
+                    b = dets[0]['box']
+                    wrist_px = ((b[0]+b[2])/2, (b[1]+b[3])/2)
+                    print(f'  wrist sees object at px '
+                          f'({wrist_px[0]:.0f},{wrist_px[1]:.0f})')
+                    c.publish_flywheel(c.wrist,
+                                       {'stage': 'teach: pre-close',
+                                        'label': a.object,
+                                        'score': dets[0]['score'],
+                                        'box': [round(t) for t in b]},
+                                       box=b, pick_px=wrist_px, cam='wrist')
+            except Exception as e:
+                print(f'  wrist detect failed: {e}')
+        rec = DualRecorder(root, 1 + max(
+            [int(q.name[3:]) for q in root.glob('ep_*')] or [-1]),
+            f'pick up the {a.object}') if a.record else None
+        c.grip(p_strategy['secure'], secs=1.4, rec=rec, phase='grasp')
+        c.move(pose[0], pose[1], pose[2] + 130.0, speed=30.0,
+               rec=rec, phase='lift')
+        c.spin(0.8)
+        held = c.verify(a.prompt, pick_xy=(pose[0], pose[1]))
+        if rec:
+            rec.finish(held, {'object': a.object, 'taught': True,
+                              'pose': list(pose), 'held': held})
+        bank = load_bank()
+        bank.append({'object': a.object, 'pose': list(pose),
+                     'wrist_px': list(wrist_px) if wrist_px else None,
+                     'success': bool(held), 'ts': time.time()})
+        Path(BANK_FILE).write_text(json.dumps(bank, indent=1))
+        if held:
+            n_ok += 1
+            if wrist_px is not None:
+                update_anchor(*wrist_px)
+            print(f'  HELD ✓  (bank now {len(bank)} demos, {n_ok} this '
+                  'session). Setting back down.')
+            c.move(pose[0], pose[1], pose[2] + 4.0, speed=30.0)
+            c.grip(WIDE, secs=1.0)
+            c.move(pose[0], pose[1], pose[2] + 120.0, speed=70.0)
+        else:
+            print('  MISS — claw opened for repositioning')
+            c.grip(WIDE, secs=0.8)
+    print(f'\nteach session done: {n_ok} successful demos -> {BANK_FILE}')
 
 
 def load_anchor():
@@ -270,6 +435,10 @@ def main():
     ap.add_argument('--allow-drive', action='store_true',
                     help='permit tucked-arm encoder staging moves (operator '
                          'gate; default OFF)')
+    ap.add_argument('--teach', action='store_true',
+                    help='human-in-the-loop pick-pose demos: operator '
+                         'positions the open claw, system closes/lifts/'
+                         'verifies and learns anchor + grasp z')
     ap.add_argument('--out', type=str, default='/demos_pick')
     a = ap.parse_args()
 
@@ -281,17 +450,35 @@ def main():
     root = Path(a.out)
     if a.record:
         root.mkdir(parents=True, exist_ok=True)
+    if a.teach:
+        teach(c, a, root)
+        c.destroy_node()
+        rclpy.shutdown()
+        return 0
     idx = 1 + max([int(p.name[3:]) for p in root.glob('ep_*')] or [-1]) \
         if a.record else 0
+    STRATEGIES[a.strategy]['gz'] = taught_gz(a.object,
+                                             STRATEGIES[a.strategy]['gz'])
 
     ok_n = miss_n = 0
     for ep in range(a.episodes):
         print(f'\n── {a.object} attempt {ep+1}/{a.episodes} ──')
         bx, by, why, u0 = c.coarse(a.prompt)
+        if why == 'blind' and a.allow_drive:
+            # object inside the depth blind zone: tucked-arm backup, coarse
+            # again from depth-valid range (the drive-back happens in the
+            # normal staging block below)
+            print('  [coarse] blind -> tucked backup 0.18m')
+            c.move(255, 0, 60, GRIP_CLOSED, speed=90.0)
+            fut = c.drv.call_async(DriveRelative.Request(
+                dx=-0.18, dy=0.0, dyaw=0.0))
+            while not fut.done():
+                c.spin(0.1)
+            bx, by, why, _ = c.coarse(a.prompt)
         if why != 'ok':
             print(f'  no coarse target ({why})'
-                  + (' -- and base moves are gated off' if why == 'blind'
-                     else ''))
+                  + ('' if a.allow_drive else ' -- and base moves are gated '
+                     'off'))
             miss_n += 1
             continue
         rng, bearing = math.hypot(bx, by), math.atan2(by, bx)
@@ -322,11 +509,13 @@ def main():
 
         rec = DualRecorder(root, idx, f'pick up the {a.object}') \
             if a.record else None
+        bx0, by0 = bx, by
         bx, by, wrist_px = c.refine(bx, by, a.prompt, STRATEGIES[a.strategy]['gz'])
+        corr_mm = math.hypot(bx - bx0, by - by0) if wrist_px else None
         held = False
         try:
             if c.grasp(bx, by, a.strategy, rec=rec):
-                held = c.verify(a.prompt)
+                held = c.verify(a.prompt, pick_xy=(bx, by))
         except RuntimeError as e:
             print(f'  aborted: {e}')
         if rec:
@@ -335,7 +524,10 @@ def main():
             idx += 1
         if held:
             ok_n += 1
-            if wrist_px is not None:
+            # only teach the anchor from picks that needed little/no
+            # correction: a success after a big correction says where the
+            # object WAS, not where the grasp point is
+            if wrist_px is not None and (corr_mm is None or corr_mm < 12.0):
                 update_anchor(*wrist_px)
             if a.keep and ep == a.episodes - 1:
                 print('holding (--keep)')

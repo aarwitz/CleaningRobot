@@ -82,6 +82,15 @@ class BallPick(Cycle):
                                            '/flywheel/wrist/overlay', 2),
         }
         self.fw_meta = self.create_publisher(String, '/flywheel/meta', 2)
+        # Re-publish the last overlay at 1 Hz: a single transient publish
+        # loses the DDS late-joiner race with rosbridge and the page shows
+        # only raw streams (operator-observed) -- keep the last inference live.
+        self._fw_last = {}
+        self.create_timer(1.0, self._fw_tick)
+
+    def _fw_tick(self):
+        for cam, m in self._fw_last.items():
+            self.fw_img[cam].publish(m)
 
     def publish_flywheel(self, frame, meta, box=None, pick_px=None,
                          cam='head'):
@@ -107,7 +116,9 @@ class BallPick(Cycle):
             m.format = 'jpeg'
             m.data = cv2.imencode('.jpg', vis,
                                   [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
-            self.fw_img.get(cam, self.fw_img['head']).publish(m)
+            cam = cam if cam in self.fw_img else 'head'
+            self.fw_img[cam].publish(m)
+            self._fw_last[cam] = m
             s = String()
             s.data = json.dumps({'ts': time.time(), 'cam': cam, **meta})
             self.fw_meta.publish(s)
