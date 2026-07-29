@@ -250,8 +250,11 @@ class PickPipeline(BallPick):
             dx_mm = dv * anc['mm_per_px']
             dy_mm = -du * anc['mm_per_px']
         n = math.hypot(dx_mm, dy_mm)
-        if n > 45.0:
-            dx_mm, dy_mm = dx_mm * 45.0 / n, dy_mm * 45.0 / n
+        if n > 65.0:
+            # log the raw magnitude: a consistently-capped correction is a
+            # SYSTEMATIC staging bias (open-loop yaw), not detection noise
+            print(f'  [refine] raw correction {n:.0f}mm capped at 65')
+            dx_mm, dy_mm = dx_mm * 65.0 / n, dy_mm * 65.0 / n
         print(f'  [refine] wrist px ({wu:.0f},{wv:.0f}) vs anchor '
               f'({anc["u"]:.0f},{anc["v"]:.0f}) -> correct '
               f'({dx_mm:+.0f},{dy_mm:+.0f})mm')
