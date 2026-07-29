@@ -439,7 +439,7 @@ def main():
                     help='human-in-the-loop pick-pose demos: operator '
                          'positions the open claw, system closes/lifts/'
                          'verifies and learns anchor + grasp z')
-    ap.add_argument('--out', type=str, default='/demos_pick')
+    ap.add_argument('--out', type=str, default='/demos/picks')
     a = ap.parse_args()
 
     rclpy.init()
