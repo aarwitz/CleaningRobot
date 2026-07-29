@@ -45,7 +45,8 @@ from cv_bridge import CvBridge
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from std_msgs.msg import String
 
-BALL_PROMPT = 'orange ball. rubber basketball. dog toy ball'
+BALL_PROMPT = ('small and bumpy orange basketball. '
+               'orange rubber toy ball with black seams')
 BALL_R = 30.0                # mm, tiny basketball
 FLOOR_Z = None               # solved from depth each observe; see floor_tz()
 TIP_DROP = 50.0              # jaw tips hang this far below the wrist z

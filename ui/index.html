@@ -404,6 +404,7 @@
         <button data-stream="color" class="on">COLOR</button>
         <button data-stream="infra">INFRA-1</button>
         <button data-stream="depth">DEPTH</button>
+        <button data-stream="wrist">WRIST</button>
       </div>
       <div class="cam-wrap">
         <canvas id="camCanvas" width="640" height="480"></canvas>
@@ -748,6 +749,7 @@ const STREAMS = {
   color: { topic: '/camera/color/image_raw/compressed',                label: 'COLOR' },
   infra: { topic: '/camera/infra1/image_rect_raw/compressed',          label: 'INFRA-1' },
   depth: { topic: '/camera/aligned_depth_to_color/image_raw/compressed', label: 'DEPTH (jpeg render)' },
+  wrist: { topic: '/wrist_cam/image_raw/compressed',                   label: 'WRIST (global shutter)' },
 };
 let activeStream = 'color';
 
