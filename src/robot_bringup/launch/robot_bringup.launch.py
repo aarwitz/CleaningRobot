@@ -664,6 +664,16 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(enable_visualization)
     )
+
+    # 11. Wrist camera (arm-mounted global shutter, 32e4:0234 on /dev/video0)
+    # -> /wrist_cam/image_raw/compressed. The pick pipeline's refine/verify
+    # stages and the SUDS wrist panel depend on it; it must survive restarts
+    # (it was lost twice as a manually-started process before this entry).
+    wrist_cam = ExecuteProcess(
+        cmd=['python3', '/scripts/wrist_cam.py'],
+        output='screen',
+        respawn=True, respawn_delay=3.0,
+    )
     
     # Assemble launch description
     return LaunchDescription([
@@ -783,4 +793,5 @@ def generate_launch_description():
         robot_state_publisher_node,
         rosbridge_server,
         http_server,
+        wrist_cam,
     ])
