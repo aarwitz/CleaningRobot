@@ -28,6 +28,7 @@ Modes:
 import argparse
 import datetime
 import fcntl
+import functools
 import json
 import os
 import shlex
@@ -42,6 +43,9 @@ LOG_FILE = os.path.expanduser('~/robot_runs.log')
 SETUP = 'source /opt/vision_ws/install/setup.bash'
 WS = '/scripts'     # scripts/ bind-mount inside the container
 COMPOSE_DIR = os.path.expanduser('~/workspaces/CleaningRobot/docker')
+# ssh/pipe invocations block-buffer stdout, so our own preflight lines print
+# AFTER the streamed pipeline output; flush every print
+print = functools.partial(print, flush=True)
 COMPOSE_TELEOP = ['docker', 'compose', '-f', 'docker-compose.yml']
 COMPOSE_CLASSIC = COMPOSE_TELEOP + ['-f', 'docker-compose.classic.yml']
 
@@ -161,7 +165,31 @@ def mode_pick(a):
         cmd += f' --gz {a.gz}'
     if a.drop_at:
         cmd += f' --drop-at {shlex.quote(a.drop_at)}'
-    return in_container_tty(cmd)
+    hov = hover_arg(a.hover)
+    if hov is None and a.hover:
+        return 2
+    return in_container_tty(cmd + hov)
+
+
+def hover_arg(hover):
+    """Validate an "x,y" hover override (the wrapper is the allowlist):
+    reachable annulus only -- floor grasps die past r~340 and the claw
+    fouls the chassis inside r~170. Returns the cmd suffix ('' if unset),
+    or None on invalid input."""
+    if not hover:
+        return ''
+    try:
+        hx, hy = (float(v) for v in hover.split(','))
+    except ValueError:
+        print(f'bad --hover {hover!r}: want "x,y" in mm')
+        return None
+    import math
+    r = math.hypot(hx, hy)
+    if not (170.0 <= r <= 345.0) or abs(hy) > 100.0:
+        print(f'--hover ({hx:.0f},{hy:.0f}) out of bounds: '
+              'need 170 <= r <= 345 and |y| <= 100')
+        return None
+    return f' --hover {shlex.quote(hover)}'
 
 
 def mode_pi(a):
@@ -195,9 +223,15 @@ def mode_calibrate(a):
 def mode_anchor(a):
     if not preflight(['teleop', 'wrist', 'dino']):
         return 2
-    return in_container_tty(f'python3 {WS}/pick_pipeline.py '
-                            f'--self-anchor --object {shlex.quote(a.object)} '
-                            f'--prompt {shlex.quote(a.prompt)}')
+    cmd = (f'python3 {WS}/pick_pipeline.py '
+           f'--self-anchor --object {shlex.quote(a.object)} '
+           f'--prompt {shlex.quote(a.prompt)}')
+    if a.gz is not None:
+        cmd += f' --gz {a.gz}'
+    hov = hover_arg(a.hover)
+    if hov is None and a.hover:
+        return 2
+    return in_container_tty(cmd + hov)
 
 
 def mode_viz(_a):
@@ -444,6 +478,9 @@ def main():
     p.add_argument('--strategy', default='sweep')
     p.add_argument('--gz', type=float)
     p.add_argument('--drop-at')
+    p.add_argument('--hover',
+                   help='"x,y" wrist-only nominal hover override (mm); '
+                        'validated to 170<=r<=345, |y|<=100')
     p = sub.add_parser('pi')
     p.add_argument('--prompt', required=True)
     p.add_argument('--execute', action='store_true',
@@ -455,6 +492,12 @@ def main():
     p = sub.add_parser('anchor')
     p.add_argument('--object', required=True)
     p.add_argument('--prompt', required=True)
+    p.add_argument('--gz', type=float,
+                   help='grasp z for the anchor attempts (wrong depth never '
+                        'holds and learns nothing)')
+    p.add_argument('--hover',
+                   help='"x,y" starting hover (mm); anchors are '
+                        'pose-dependent, learn from where you will pick')
     p = sub.add_parser('classic')
     g = p.add_mutually_exclusive_group()
     g.add_argument('--go', action='store_true',

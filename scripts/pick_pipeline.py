@@ -205,6 +205,8 @@ class PickPipeline(BallPick):
         if dark:
             print(f'  [wrist] rejecting claw self-detection at '
                   f'({u:.0f},{v:.0f})')
+            self.__dict__.setdefault('fw_rejects', []).append(
+                (box, 'claw', 0.0))
         return dark
 
     def distractor_filter(self, dets, img_path, min_area=6000.0):
@@ -219,6 +221,8 @@ class PickPipeline(BallPick):
             if (b[2] - b[0]) * (b[3] - b[1]) < min_area:
                 print(f'  [wrist] rejecting tiny det '
                       f'({(b[2]-b[0])*(b[3]-b[1]):.0f} px^2)')
+                self.__dict__.setdefault('fw_rejects', []).append(
+                    (b, 'tiny', d_.get('confidence') or d_.get('score') or 0))
                 continue
             kept.append(d_)
         if not kept:
@@ -245,6 +249,8 @@ class PickPipeline(BallPick):
                       f"'{hit.get('label')}' "
                       f"{(hit.get('confidence') or hit.get('score')):.2f} "
                       f"beats sock {cf:.2f}")
+                self.__dict__.setdefault('fw_rejects', []).append(
+                    (d_['box'], str(hit.get('label', 'distractor')), cf))
                 continue
             out.append(d_)
         return out
@@ -271,6 +277,7 @@ class PickPipeline(BallPick):
                   'refusing to correct')
             return bx, by, None
         self.ensure_light()
+        self.fw_rejects = []     # filters below append (box, reason, score)
         cv2.imwrite('/tmp/_wrist.png', self.wrist)
         try:
             dets = dino_client.detect('/tmp/_wrist.png', prompt,
@@ -323,7 +330,7 @@ class PickPipeline(BallPick):
             self.publish_flywheel(self.wrist,
                                   {'stage': 'refine (wrist cam): no det',
                                    'label': prompt.split('.')[0]},
-                                  cam='wrist')
+                                  cam='wrist', rejects=self.fw_rejects)
             return bx, by, None
         anc = load_anchor()
 
@@ -361,6 +368,31 @@ class PickPipeline(BallPick):
                 dets.sort(key=lambda d_: math.hypot(
                     (d_['box'][0] + d_['box'][2]) / 2 - anc['u'],
                     (d_['box'][1] + d_['box'][3]) / 2 - anc['v']))
+        if anc is not None:
+            # JUMP GATE (2026-08-16): a det implying a >150mm correction is
+            # not the object we are hovering over -- it is a different object
+            # at the frame edge (seen: px(601,235) -> raw 279mm yanked the
+            # arm off a locked black sock toward the white one; the 65mm cap
+            # limits step SIZE but still lets a ghost det steer direction).
+            far = [d_ for d_ in dets
+                   if math.hypot(*corr_of(d_['box'])) > 150.0]
+            for d_ in far:
+                n_ = math.hypot(*corr_of(d_['box']))
+                print(f'  [refine] jump-gate: det implies {n_:.0f}mm -- '
+                      'a different object, not the tracked one')
+                self.fw_rejects.append(
+                    (d_['box'], f'jump {n_:.0f}mm',
+                     d_.get('confidence') or d_.get('score') or 0))
+            dets = [d_ for d_ in dets if d_ not in far]
+            if not dets:
+                print('  [refine] all detections jump-gated -- '
+                      'keeping target')
+                self.publish_flywheel(
+                    self.wrist,
+                    {'stage': 'refine (wrist cam): jump-gated',
+                     'label': prompt.split('.')[0]},
+                    cam='wrist', rejects=self.fw_rejects)
+                return bx, by, None
         wbox = dets[0]['box']
         wu, wv = (wbox[0] + wbox[2]) / 2, (wbox[1] + wbox[3]) / 2
         if anc is None:
@@ -371,7 +403,8 @@ class PickPipeline(BallPick):
                                    'label': prompt.split('.')[0],
                                    'score': dets[0]['score'],
                                    'box': [round(t) for t in wbox]},
-                                  box=wbox, pick_px=(wu, wv), cam='wrist')
+                                  box=wbox, pick_px=(wu, wv), cam='wrist',
+                                  rejects=self.fw_rejects)
             return bx, by, (wu, wv)
         # wrist cam rigid to EE: px offset -> arm offset. Use the measured
         # 2x2 Jacobian when calibrated (--calibrate-wrist); the hand-assumed
@@ -400,7 +433,8 @@ class PickPipeline(BallPick):
                                'box': [round(t) for t in wbox],
                                'pick_arm': [round(bx + dx_mm),
                                             round(by + dy_mm)]},
-                              box=wbox, pick_px=(wu, wv), cam='wrist')
+                              box=wbox, pick_px=(wu, wv), cam='wrist',
+                              rejects=self.fw_rejects)
         return bx + dx_mm, by + dy_mm, (wu, wv)
 
     # ── grasp strategies ────────────────────────────────────────────────────
@@ -753,13 +787,21 @@ def self_anchor(c, a):
     the standard hover, release it, and detect where it lands. The landing
     pixel is the grasp point as seen by the (new) camera orientation --
     a gold sample with no human in the loop."""
-    gz = STRATEGIES[a.strategy]['gz']
+    # --gz matters here as much as in a pick: an anchor session at the wrong
+    # depth never holds, exhausts the spiral, and learns nothing
+    gz = a.gz if a.gz is not None else STRATEGIES[a.strategy]['gz']
+    nominal = (300.0, 0.0)
+    if a.hover:
+        # anchors are POSE-DEPENDENT: one learned at (300,0) put six straight
+        # centered grasps into empty floor at (200,-20) (2026-08-16). Learn
+        # it from the hover you will pick from.
+        nominal = tuple(float(v) for v in a.hover.split(','))
     offsets = [(0, 0), (15, 0), (-15, 0), (0, 15), (0, -15),
                (15, 15), (-15, -15), (20, -20)]
     for i, (ox, oy) in enumerate(offsets):
         print(f'\n── self-anchor attempt {i+1}/{len(offsets)} '
               f'offset ({ox:+.0f},{oy:+.0f}) ──')
-        bx, by, wrist_px = c.refine(300.0, 0.0, a.prompt, gz, cap=140.0)
+        bx, by, wrist_px = c.refine(*nominal, a.prompt, gz, cap=140.0)
         if wrist_px is None:
             for sx, sy in ((260.0, 70.0), (320.0, -70.0),
                            (250.0, -70.0), (340.0, 60.0)):
@@ -863,6 +905,10 @@ def main():
                          'depth-valid band.')
     ap.add_argument('--gz', type=float, default=None,
                     help='override grasp z (beats strategy default and bank)')
+    ap.add_argument('--hover', type=str, default=None,
+                    help='"x,y" wrist-only nominal hover override, for objects '
+                         'the fixed spots miss (e.g. dragged close to the '
+                         'chassis). Validated/allowlisted by scripts/robot.')
     ap.add_argument('--drop-at', type=str, default=None,
                     help='"x,y" arm coords to release at instead of the pick '
                          'spot')
@@ -928,7 +974,10 @@ def main():
             # (blind <300mm, box hits frame bottom); the wrist cam owns
             # anything already in reach
             bx, by, why, u0 = 300.0, 0.0, 'ok', None
-            print('  [wrist-only] nominal hover (300,0); wrist cam localizes')
+            if a.hover:
+                bx, by = (float(v) for v in a.hover.split(','))
+            print(f'  [wrist-only] nominal hover ({bx:.0f},{by:.0f}); '
+                  'wrist cam localizes')
         else:
             bx, by, why, u0 = c.coarse(a.prompt)
         if why == 'blind' and a.allow_drive:

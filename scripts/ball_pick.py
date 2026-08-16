@@ -93,10 +93,22 @@ class BallPick(Cycle):
             self.fw_img[cam].publish(m)
 
     def publish_flywheel(self, frame, meta, box=None, pick_px=None,
-                         cam='head'):
-        """Annotate + publish what the pick pipeline sees/decides."""
+                         cam='head', rejects=None):
+        """Annotate + publish what the pick pipeline sees/decides.
+
+        `rejects`: [(box, reason, score), ...] -- candidates the filters
+        threw out, drawn in red WITH the reason. The operator watches on
+        SUDS and cannot see the terminal log; an overlay with no boxes
+        reads as "saw nothing" when the truth is "saw 3 things, rejected
+        all 3" (operator request 2026-08-16)."""
         try:
             vis = frame.copy()
+            for rbox, reason, rscore in (rejects or []):
+                rx0, ry0, rx1, ry1 = (int(t) for t in rbox)
+                cv2.rectangle(vis, (rx0, ry0), (rx1, ry1), (90, 90, 255), 1)
+                cv2.putText(vis, f'{reason} {rscore:.2f}',
+                            (rx0, max(12, ry0 - 4)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (90, 90, 255), 1)
             if box is not None:
                 x0, y0, x1, y1 = (int(v) for v in box)
                 cv2.rectangle(vis, (x0, y0), (x1, y1), (60, 220, 255), 2)
@@ -120,6 +132,9 @@ class BallPick(Cycle):
             self.fw_img[cam].publish(m)
             self._fw_last[cam] = m
             s = String()
+            if rejects:
+                meta = {**meta,
+                        'rejects': [f'{r} {sc:.2f}' for _, r, sc in rejects]}
             s.data = json.dumps({'ts': time.time(), 'cam': cam, **meta})
             self.fw_meta.publish(s)
             self.spin(0.05)
