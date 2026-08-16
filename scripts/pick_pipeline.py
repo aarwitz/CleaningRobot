@@ -591,9 +591,15 @@ class PickPipeline(BallPick):
             # position) is only a sorting preference, and gating on it
             # rejected a parallax-PROVEN sock legitimately ~140mm out
             # during scans (cost two hovers in the staged test).
+            # 200mm, not 100: batch of 2026-08-16 showed the SCOUT carries a
+            # consistent ~(+65,+68)mm bias (picks landed at (289,12) vs
+            # scout (227,-56)), so a 100mm gate rejected the true sock at
+            # every aimed hover. 200 still kills the 360mm lures. meta now
+            # records scout_target so the bias can be fit from accumulated
+            # scout-vs-pick pairs and the gate re-tightened.
             off = [d_ for d_ in dets if math.hypot(
                 bx + corr_of(d_['box'])[0] - hard_lock[0],
-                by + corr_of(d_['box'])[1] - hard_lock[1]) > 100.0]
+                by + corr_of(d_['box'])[1] - hard_lock[1]) > 200.0]
             for d_ in off:
                 dd = math.hypot(bx + corr_of(d_['box'])[0] - hard_lock[0],
                                 by + corr_of(d_['box'])[1] - hard_lock[1])
@@ -1284,6 +1290,7 @@ def main():
     ok_n = miss_n = 0
     for ep in range(a.episodes):
         print(f'\n── {a.object} attempt {ep+1}/{a.episodes} ──')
+        scout_lock = None
         if a.wrist_only:
             # the head cam cannot depth-localize inside the arm's workspace
             # (blind <300mm, box hits frame bottom) -- but with the fused
@@ -1442,7 +1449,12 @@ def main():
             print(f'  aborted: {e}')
         if rec:
             rec.finish(held, {'object': a.object, 'strategy': a.strategy,
-                              'pick': [bx, by], 'held': held})
+                              'pick': [bx, by], 'held': held,
+                              # scout-vs-actual pairs accumulate across
+                              # episodes -> fit the head-cam projection bias
+                              **({'scout_target': [round(scout_lock[0], 1),
+                                                   round(scout_lock[1], 1)]}
+                                 if scout_lock else {})})
             idx += 1
         if held:
             ok_n += 1
