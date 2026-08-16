@@ -90,6 +90,7 @@ exec ros2 launch robot_bringup robot_bringup.launch.py \
     enable_depth:="${ENABLE_DEPTH:-true}" \
     enable_arm:="${ENABLE_ARM:-true}" \
     enable_teleop:="${ENABLE_TELEOP:-false}" \
+    enable_wrist_yolo:="${ENABLE_WRIST_YOLO:-false}" \
     enable_imu:="${ENABLE_IMU:-True}" \
     camera_fps:="${CAMERA_FPS:-90}" \
     enable_nvblox:="${ENABLE_NVBLOX:-true}" \

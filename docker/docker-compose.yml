@@ -50,6 +50,9 @@ services:
       # SLAM / YOLO / nvblox stay off to free the GPU; teleop consumes only the
       # color stream. Flip these back for autonomous missions.
       ENABLE_TELEOP: "true"
+      # on-device socks2 on both cameras + wrist raw republish
+      # (head_scout fusion, robot pick --wrist-detector yolo)
+      ENABLE_WRIST_YOLO: "true"
       ENABLE_SLAM: "false"
       ENABLE_YOLO: "false"
       ALIGN_DEPTH: "true"

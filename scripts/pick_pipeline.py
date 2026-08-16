@@ -1281,8 +1281,12 @@ def main():
         return 0
     idx = 1 + max([int(p.name[3:]) for p in root.glob('ep_*')] or [-1]) \
         if a.record else 0
+    _gz_strategy_default = STRATEGIES[a.strategy]['gz']
     STRATEGIES[a.strategy]['gz'] = taught_gz(a.object,
                                              STRATEGIES[a.strategy]['gz'])
+    # True when the per-object bank had a LEARNED depth; the scout default
+    # below must never trample it (audit 2026-08-16)
+    gz_taught = STRATEGIES[a.strategy]['gz'] != _gz_strategy_default
     if a.gz is not None:
         STRATEGIES[a.strategy]['gz'] = a.gz
         print(f'  [gz] operator override {a.gz:.0f}')
@@ -1322,12 +1326,13 @@ def main():
                     print(f'  [wrist-only] scout-aimed hover '
                           f'({bx:.0f},{by:.0f}) locked on '
                           f'({scout_lock[0]:.0f},{scout_lock[1]:.0f})')
-                    if a.gz is None:
+                    if a.gz is None and not gz_taught:
                         # depth-loft is UNMEASURABLE in the pick zone (the
                         # RealSense min-range ~300mm blind band -- validated
                         # 2026-08-16), so default to the mid-loft rung:
                         # -212 held but plunged deeper than needed
-                        # (operator-observed "a little too deep")
+                        # (operator-observed "a little too deep").
+                        # Precedence: --gz > taught bank > this default.
                         STRATEGIES[a.strategy]['gz'] = -203.0
                         print('  [gz] scout default -203 (mid-loft; '
                               'override with --gz)')

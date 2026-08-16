@@ -62,6 +62,12 @@ def generate_launch_description():
         'enable_teleop', default_value='false',
         description='Enable the operator teleop server (base + arm from the web UI)'
     )
+
+    enable_wrist_yolo_arg = DeclareLaunchArgument(
+        'enable_wrist_yolo', default_value='false',
+        description='On-device socks2 on both cameras + wrist raw republish '
+                    '(head_scout fusion and robot pick --wrist-detector yolo)'
+    )
     
     enable_visualization_arg = DeclareLaunchArgument(
         'enable_visualization', default_value='true',
@@ -688,6 +694,45 @@ def generate_launch_description():
         output='screen',
         respawn=True, respawn_delay=3.0,
     )
+
+    # ── on-device socks2 on BOTH cameras (2026-08-16) ────────────────────
+    # These ran ad-hoc via docker exec during bring-up; a container restart
+    # silently killed the whole yolo path (scout fusion + --wrist-detector
+    # yolo preflight). Now launch-managed, gated by enable_wrist_yolo.
+    # NOTE: socks2.onnx expects BGR input (measured: BGR 0.54-0.81 vs RGB
+    # 0.05-0.67); a future RGB-standard socks3 must flip bgr_input.
+    wrist_republish = ExecuteProcess(
+        cmd=['ros2', 'run', 'image_transport', 'republish',
+             'compressed', 'raw', '--ros-args',
+             '-r', 'in/compressed:=/wrist_cam/image_raw/compressed',
+             '-r', 'out:=/wrist_cam/image_raw'],
+        output='screen', respawn=True, respawn_delay=3.0,
+        condition=IfCondition(LaunchConfiguration('enable_wrist_yolo')),
+    )
+    wrist_yolo = ExecuteProcess(
+        cmd=['ros2', 'run', 'yolo_trt_py', 'yolo_trt_node', '--ros-args',
+             '-r', '__node:=wrist_yolo_node',
+             '-p', 'model_file_path:=/models/socks2.onnx',
+             '-p', 'engine_file_path:=/models/socks2_py.plan',
+             '-p', 'num_classes:=1', '-p', 'confidence_threshold:=0.22',
+             '-p', 'input_topic:=/wrist_cam/image_raw',
+             '-p', 'output_topic:=/wrist_yolo/detections',
+             '-p', 'rate_hz:=5.0', '-p', 'bgr_input:=true'],
+        output='screen', respawn=True, respawn_delay=5.0,
+        condition=IfCondition(LaunchConfiguration('enable_wrist_yolo')),
+    )
+    head_yolo = ExecuteProcess(
+        cmd=['ros2', 'run', 'yolo_trt_py', 'yolo_trt_node', '--ros-args',
+             '-r', '__node:=head_yolo_node',
+             '-p', 'model_file_path:=/models/socks2.onnx',
+             '-p', 'engine_file_path:=/models/socks2_py.plan',
+             '-p', 'num_classes:=1', '-p', 'confidence_threshold:=0.30',
+             '-p', 'input_topic:=/camera/color/image_raw',
+             '-p', 'output_topic:=/head_yolo/detections',
+             '-p', 'rate_hz:=5.0', '-p', 'bgr_input:=true'],
+        output='screen', respawn=True, respawn_delay=5.0,
+        condition=IfCondition(LaunchConfiguration('enable_wrist_yolo')),
+    )
     
     # Assemble launch description
     return LaunchDescription([
@@ -699,6 +744,7 @@ def generate_launch_description():
         enable_nav2_arg,
         enable_arm_arg,
         enable_teleop_arg,
+        enable_wrist_yolo_arg,
         enable_visualization_arg,
         enable_nvblox_arg,
         cam_w_arg,
@@ -809,4 +855,7 @@ def generate_launch_description():
         http_server,
         wrist_cam,
         flywheel_relay,
+        wrist_republish,
+        wrist_yolo,
+        head_yolo,
     ])

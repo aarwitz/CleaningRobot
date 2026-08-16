@@ -58,13 +58,13 @@ Single launch file `src/robot_bringup/launch/robot_bringup.launch.py` brings up 
 - `clothes_perception` — 2D→3D detection bridge.
 - `arm_bridge` — RoArm v2 serial control.
 - `motor_controller` — I2C velocity controller.
-- `yolo_trt_py` — **alternative** pure-Python TensorRT YOLOv8 node that bypasses the Isaac ROS GXF/NITROS pipeline entirely (uses TensorRT Python API + PyTorch CUDA tensors). It is built but **not wired into the default launch file**; the Isaac ROS path (#4 above) is what runs by default.
+- `yolo_trt_py` — pure-Python TensorRT YOLOv8 node that bypasses the Isaac ROS GXF/NITROS pipeline (TensorRT Python API + PyTorch CUDA tensors). Since 2026-08-16 the launch file runs TWO instances of it under `enable_wrist_yolo` (socks2 on the wrist AND head cameras, feeding the pick pipeline's scout/refine), alongside an `image_transport republish` for the wrist raw topic. The Isaac ROS path (#4 above) remains the `classic` profile's detector.
 
 Each Python package is standard ament_python with a `console_scripts` entry point named `<pkg>_node`. Add a node by registering it in that package's `setup.py` and the launch file.
 
 ## Models
 
-`models/` holds `*.onnx` (weights) and the `*.plan` (TensorRT engine, device-specific, regenerated from ONNX). Both are gitignored. `yolov8s.onnx` is generic COCO (80 classes); `clothes2.onnx` / `socks2.onnx` are the custom single-class detectors. The `.plan` is rebuilt from the ONNX when missing/forced; it is not portable across TensorRT versions.
+`models/` holds `*.onnx` (weights) and the `*.plan` (TensorRT engine, device-specific, regenerated from ONNX). Both are gitignored. `yolov8s.onnx` is generic COCO (80 classes); `clothes2.onnx` / `socks2.onnx` are the custom single-class detectors. The `.plan` is rebuilt from the ONNX when missing/forced; it is not portable across TensorRT versions. `socks2_py.plan` is the pure-Python node's own FP32 engine — keep it separate from the Isaac `socks2.plan`. **socks2.onnx expects BGR input** (measured 2026-08-16: BGR 0.54–0.81 vs RGB 0.05–0.67); `yolo_trt_node` runs it with `bgr_input:=true`. A future RGB-standard retrain must flip that flag.
 
 ## Tests
 
@@ -99,7 +99,8 @@ docker-exec bespoke python that commands the arm, do not publish to
 
 ```
 scripts/robot status       # health snapshot (moves nothing)
-scripts/robot pick ...     # scripted DINO pick (wrist-only)
+scripts/robot pick ...     # teacher pick; --wrist-detector yolo = on-device
+                           # socks2 + head-scout fusion (recommended)
 scripts/robot pi ...       # π0 policy episode (--execute to move)
 scripts/robot calibrate    # wrist Jacobian re-measure
 scripts/robot anchor ...   # self-anchor grasp-drop-observe
