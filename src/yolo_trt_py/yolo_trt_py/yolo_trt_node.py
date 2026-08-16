@@ -56,6 +56,10 @@ class YoloTrtNode(Node):
         self.declare_parameter('output_topic', '/yolo/detections')
         self.declare_parameter('rate_hz', 10.0)
         self.declare_parameter('force_engine_update', False)
+        # socks2.onnx was fine-tuned on BGR-ordered images (measured
+        # 2026-08-16: BGR 0.54-0.81 vs RGB 0.05-0.67 on the same frames,
+        # catastrophic on wrist views). Default False = standard YOLOv8 RGB.
+        self.declare_parameter('bgr_input', False)
 
         self.onnx_path = str(self.get_parameter('model_file_path').value)
         self.engine_path = str(self.get_parameter('engine_file_path').value)
@@ -227,7 +231,12 @@ class YoloTrtNode(Node):
 
         blob = padded.astype(np.float32) / 255.0
         blob = blob.transpose(2, 0, 1)[np.newaxis]  # [1, 3, H, W]
-        return blob, scale, pad_x, pad_y
+        # CRITICAL: transpose() makes the array NON-contiguous, and
+        # torch.from_numpy().cuda() preserves those strides -- but TensorRT
+        # reads data_ptr() as dense NCHW, so it saw channel-scrambled garbage
+        # and scored ~0.000 on everything (found 2026-08-16; the model itself
+        # scores 0.7+ once the buffer is contiguous).
+        return np.ascontiguousarray(blob), scale, pad_x, pad_y
 
     # --------------------------------------------------------- Postprocess
     def _postprocess(self, output: np.ndarray):
@@ -326,6 +335,8 @@ class YoloTrtNode(Node):
                 f'Unsupported encoding: {msg.encoding}', throttle_duration_sec=5.0
             )
             return
+        if self.get_parameter('bgr_input').value:
+            img = img[:, :, ::-1]   # model wants BGR; _preprocess handles views
 
         # Preprocess
         blob, _scale, _pad_x, _pad_y = self._preprocess(img)

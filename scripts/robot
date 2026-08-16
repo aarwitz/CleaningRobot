@@ -168,6 +168,23 @@ def mode_pick(a):
     hov = hover_arg(a.hover)
     if hov is None and a.hover:
         return 2
+    if a.wrist_detector == 'yolo':
+        # hz proves data flows, but a fresh CLI subscriber can lose seconds
+        # to DDS discovery -- fall back to a process check before failing
+        r = in_container('timeout 10 ros2 topic hz /wrist_yolo/detections '
+                         '--window 3 2>&1 | head -3', timeout=16, capture=True)
+        ok = 'average rate' in (r.stdout or '')
+        if not ok:
+            r = in_container("pgrep -f '[y]olo_trt_node' | head -1",
+                             timeout=10, capture=True)
+            ok = bool((r.stdout or '').strip())
+            print(f'  [preflight] wrist-yolo: '
+                  f'{"node up (hz probe raced discovery)" if ok else "DOWN"}')
+        else:
+            print('  [preflight] wrist-yolo: ok')
+        if not ok:
+            return 2
+        cmd += ' --wrist-detector yolo'
     return in_container_tty(cmd + hov)
 
 
@@ -481,6 +498,10 @@ def main():
     p.add_argument('--hover',
                    help='"x,y" wrist-only nominal hover override (mm); '
                         'validated to 170<=r<=345, |y|<=100')
+    p.add_argument('--wrist-detector', choices=('dino', 'yolo'),
+                   default='dino',
+                   help='refine detector: dino (tunnel) or yolo '
+                        '(on-device socks2)')
     p = sub.add_parser('pi')
     p.add_argument('--prompt', required=True)
     p.add_argument('--execute', action='store_true',

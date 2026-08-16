@@ -209,6 +209,60 @@ class PickPipeline(BallPick):
                 (box, 'claw', 0.0))
         return dark
 
+    def enable_wrist_yolo(self):
+        """Subscribe to the on-device socks2 wrist detector (yolo_trt_py on
+        /wrist_cam/image_raw). Replaces DINO in refine: no tunnel in the
+        critical path, no merged claw+sock mega-boxes, and single-class
+        means the counter-prompt arbitration is unnecessary by construction."""
+        from vision_msgs.msg import Detection2DArray
+        self.wrist_yolo_msg = None
+        self.wrist_yolo_t = 0.0
+
+        def _cb(m):
+            self.wrist_yolo_msg = m
+            self.wrist_yolo_t = time.time()
+        self.create_subscription(Detection2DArray, '/wrist_yolo/detections',
+                                 _cb, 5)
+        self.use_wrist_yolo = True
+
+    def wrist_yolo_dets_fresh(self, timeout=3.5):
+        """Detections computed on a frame CAPTURED after now, judged by the
+        image header stamp the node copies into the array -- NOT by message
+        arrival time. The node's ~300ms latency means a freshly ARRIVED
+        message can describe a mid-lift frame where the sock legitimately
+        filled the view; verify scored one as a hold (ep_0099 false success,
+        audited 2026-08-16). Converted from the node's 640x640 letterbox
+        space to 640x480 wrist pixels."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            self.spin(0.1)
+            m = self.wrist_yolo_msg
+            if m is not None:
+                stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+                if stamp >= t0:
+                    break
+        else:
+            print('  [wrist-yolo] no post-move-frame detections within '
+                  f'{timeout:.1f}s -- treating as no detection')
+            return []
+        dets = []
+        for d in self.wrist_yolo_msg.detections:
+            cx = d.bbox.center.position.x
+            cy = d.bbox.center.position.y - 80.0     # letterbox pad_y for 480
+            w_, h_ = d.bbox.size_x, d.bbox.size_y
+            score = max((r.hypothesis.score for r in d.results), default=0.0)
+            dets.append({'box': [cx - w_ / 2, cy - h_ / 2,
+                                 cx + w_ / 2, cy + h_ / 2],
+                         'score': score, 'confidence': score, 'label': 'sock'})
+        return dets
+
+    def wrist_detect(self, prompt, conf=0.30):
+        """Detector-agnostic wrist detection on the CURRENT wrist frame."""
+        if getattr(self, 'use_wrist_yolo', False):
+            return self.wrist_yolo_dets_fresh()
+        cv2.imwrite('/tmp/_wrist.png', self.wrist)
+        return dino_client.detect('/tmp/_wrist.png', prompt, confidence=conf)
+
     def distractor_filter(self, dets, img_path, min_area=6000.0):
         """Confidence alone cannot separate junk from socks (measured
         2026-08-11: creamer cup 0.42 > white sock 0.38 > black sock 0.33).
@@ -280,15 +334,23 @@ class PickPipeline(BallPick):
         self.fw_rejects = []     # filters below append (box, reason, score)
         cv2.imwrite('/tmp/_wrist.png', self.wrist)
         try:
-            dets = dino_client.detect('/tmp/_wrist.png', prompt,
-                                      confidence=0.30)
-            dets = self.distractor_filter(dets, '/tmp/_wrist.png')
+            dets = self.wrist_detect(prompt)
+            if getattr(self, 'use_wrist_yolo', False):
+                # single-class detector: min-area still applies, the
+                # counter-prompt arbitration does not
+                for d_ in list(dets):
+                    b = d_['box']
+                    if (b[2] - b[0]) * (b[3] - b[1]) < 6000.0:
+                        self.fw_rejects.append((b, 'tiny', d_['score']))
+                        dets.remove(d_)
+            else:
+                dets = self.distractor_filter(dets, '/tmp/_wrist.png')
             rejected = [d_ for d_ in dets
                         if self.is_claw_det(d_['box'], claw_whitelist)]
             dets = [d_ for d_ in dets if d_ not in rejected]
         except Exception as e:
-            # tunnel-down must not read as "object not there"
-            print(f'  [refine] DINO unreachable: {e}')
+            # detector-down must not read as "object not there"
+            print(f'  [refine] wrist detector unreachable: {e}')
             dets, rejected = [], []
         if not dets and rejected and claw_whitelist is None:
             # Everything we saw was dark-in-the-claw-zone. The fingers ride
@@ -302,12 +364,10 @@ class PickPipeline(BallPick):
             self.spin(0.9)
             mobile = []
             if self.wrist is not None:
-                cv2.imwrite('/tmp/_wrist.png', self.wrist)
                 try:
-                    nd = dino_client.detect('/tmp/_wrist.png', prompt,
-                                            confidence=0.30)
+                    nd = self.wrist_detect(prompt)
                 except Exception as e:
-                    print(f'  [refine] DINO unreachable in probe: {e}')
+                    print(f'  [refine] detector unreachable in probe: {e}')
                     nd = []
                 new_px = [((d_['box'][0] + d_['box'][2]) / 2,
                            (d_['box'][1] + d_['box'][3]) / 2) for d_ in nd]
@@ -368,12 +428,16 @@ class PickPipeline(BallPick):
                 dets.sort(key=lambda d_: math.hypot(
                     (d_['box'][0] + d_['box'][2]) / 2 - anc['u'],
                     (d_['box'][1] + d_['box'][3]) / 2 - anc['v']))
-        if anc is not None:
+        if anc is not None and lock_xy is not None:
             # JUMP GATE (2026-08-16): a det implying a >150mm correction is
             # not the object we are hovering over -- it is a different object
             # at the frame edge (seen: px(601,235) -> raw 279mm yanked the
             # arm off a locked black sock toward the white one; the 65mm cap
             # limits step SIZE but still lets a ghost det steer direction).
+            # ONLY once a lock exists: on the FIRST pass at a scan hover a
+            # far det is precisely what scanning is looking for (audited
+            # 2026-08-16: the gate was discarding the real sock at fresh
+            # hovers and skipping the episode).
             far = [d_ for d_ in dets
                    if math.hypot(*corr_of(d_['box'])) > 150.0]
             for d_ in far:
@@ -507,8 +571,12 @@ class PickPipeline(BallPick):
         if self.wrist is not None:
             cv2.imwrite('/tmp/_vwrist.png', self.wrist)
             try:
-                vw = dino_client.detect('/tmp/_vwrist.png', prompt,
-                                        confidence=0.30)
+                # Detector-agnostic: with --wrist-detector yolo this is
+                # socks2, whose tight boxes fix the DINO failure of
+                # 2026-08-16 -- frame-wide claw+floor mega-boxes cleared
+                # the 60k bar with an EMPTY claw (ep_0098 false success,
+                # operator-audited and corrected).
+                vw = self.wrist_detect(prompt)
                 # From the HIGH verify pose the discrimination is easy: a
                 # held object is centimeters from the wrist lens (huge bbox);
                 # a miss shows distant floor (small/no detection). Area is
@@ -909,6 +977,10 @@ def main():
                     help='"x,y" wrist-only nominal hover override, for objects '
                          'the fixed spots miss (e.g. dragged close to the '
                          'chassis). Validated/allowlisted by scripts/robot.')
+    ap.add_argument('--wrist-detector', choices=('dino', 'yolo'),
+                    default='dino',
+                    help='refine/probe detector: dino (open-vocab, tunnel) or '
+                         'yolo (on-device socks2 via /wrist_yolo/detections)')
     ap.add_argument('--drop-at', type=str, default=None,
                     help='"x,y" arm coords to release at instead of the pick '
                          'spot')
@@ -917,6 +989,10 @@ def main():
 
     rclpy.init()
     c = PickPipeline()
+    if a.wrist_detector == 'yolo':
+        c.enable_wrist_yolo()
+        print('  [wrist-yolo] refine uses on-device socks2 '
+              '(/wrist_yolo/detections)')
 
     def _halt_trap(signum, _frm):
         # A killed batch script must NEVER leave the arm parked at its last
