@@ -468,16 +468,13 @@ class PickPipeline(BallPick):
         cv2.imwrite('/tmp/_wrist.png', self.wrist)
         try:
             dets = self.wrist_detect(prompt)
-            if getattr(self, 'use_wrist_yolo', False):
-                # single-class detector: min-area still applies, the
-                # counter-prompt arbitration does not
-                for d_ in list(dets):
-                    b = d_['box']
-                    if (b[2] - b[0]) * (b[3] - b[1]) < 6000.0:
-                        self.fw_rejects.append((b, 'tiny', d_['score']))
-                        dets.remove(d_)
-            else:
-                dets = self.distractor_filter(dets, '/tmp/_wrist.png')
+            # Counter-prompt arbitration applies to BOTH detectors: "single
+            # class needs no distractor filter" died 2026-08-16 against a
+            # plastic bag FULL OF SOCKS -- socks2 detects them through the
+            # plastic (not even wrong), lured a grasp and false-verified.
+            # DINO's 'plastic bag' counter-prompt claims it; fails open if
+            # the tunnel is down.
+            dets = self.distractor_filter(dets, '/tmp/_wrist.png')
             rejected = [d_ for d_ in dets
                         if self.is_claw_det(d_['box'], claw_whitelist)]
             dets = [d_ for d_ in dets if d_ not in rejected]
@@ -582,7 +579,7 @@ class PickPipeline(BallPick):
                 print(f'  [refine] jump-gate: det implies {n_:.0f}mm -- '
                       'a different object, not the tracked one')
                 self.fw_rejects.append(
-                    (d_['box'], f'jump {n_:.0f}mm',
+                    (d_['box'], f'other {n_:.0f}mm',
                      d_.get('confidence') or d_.get('score') or 0))
             dets = [d_ for d_ in dets if d_ not in far]
             if not dets:
@@ -702,6 +699,12 @@ class PickPipeline(BallPick):
         verdict was computed from into the episode (audit trail)."""
         held_head = held_wrist = None
         self._wrist_overwhelming = False
+        # §5.5 DOCTRINE (violated until 2026-08-16, three false successes):
+        # judge ONLY from the standard high pose. From low/mid poses a sock
+        # still ON THE FLOOR subtends >60k px^2 in the wrist view and passes
+        # as held. Command the pose, settle, then look.
+        self.move(255.0, 0.0, 60.0, t=GRIP_CLOSED, speed=90.0)
+        self.spin(1.0)
         if rec is not None:
             cv2.imwrite(str(rec.dir / 'verify_head.jpg'), self.img)
             if self.wrist is not None:
@@ -722,7 +725,23 @@ class PickPipeline(BallPick):
             held_head = not floor
         except Exception:
             pass
-        if self.wrist is not None:
+        if getattr(self, 'claw_ref', None) is not None \
+                and self.wrist is not None:
+            # DETECTOR-FREE holds-check (2026-08-16, after FIVE detector-based
+            # false successes): the high verify pose is always the same pose,
+            # so compare the claw region against the empty-claw reference
+            # captured at session start. A held sock changes the region
+            # drastically; the empty claw matches its own reference.
+            roi_w = self.wrist[260:460, 180:460]
+            roi_r = self.claw_ref[260:460, 180:460]
+            diff = float(np.mean(cv2.absdiff(
+                cv2.cvtColor(roi_w, cv2.COLOR_BGR2GRAY),
+                cv2.cvtColor(roi_r, cv2.COLOR_BGR2GRAY))))
+            held_wrist = diff > 14.0
+            self._wrist_overwhelming = diff > 40.0
+            print(f'  [verify] claw-region diff vs empty ref: {diff:.1f} '
+                  f'(held>14, overwhelming>40)')
+        elif self.wrist is not None:
             cv2.imwrite('/tmp/_vwrist.png', self.wrist)
             try:
                 # Detector-agnostic: with --wrist-detector yolo this is
@@ -737,6 +756,16 @@ class PickPipeline(BallPick):
                 # the signal. Do NOT apply the claw dark-filter here: a held
                 # DARK sock in the claw zone is exactly what it rejects
                 # (observed false-miss on the navy sock, 2026-08-02).
+                # AND the det must sit AT THE CLAW: a held object is at the
+                # grasp-anchor pixel by definition. A big det elsewhere in
+                # frame (the sock-filled bag, frame-left) passed this check
+                # with an empty claw (ep_0108 false success, 2026-08-16).
+                anc_ = load_anchor()
+                cu, cv_ = (anc_['u'], anc_['v']) if anc_ else (320.0, 400.0)
+                vw = [d_ for d_ in vw
+                      if math.hypot((d_['box'][0] + d_['box'][2]) / 2 - cu,
+                                    (d_['box'][1] + d_['box'][3]) / 2 - cv_)
+                      < 170.0]
                 areas = [(d_['box'][2] - d_['box'][0]) *
                          (d_['box'][3] - d_['box'][1]) for d_ in vw]
                 # thresholds re-derived from the 2026-08-02 audit: from the
@@ -1170,6 +1199,14 @@ def main():
     if not c.wait_ready() or not c.wait_depth():
         print('ABORT: teleop/camera/depth not ready')
         return 1
+    # Empty-claw reference for the detector-free holds-check: command the
+    # standard high verify pose (claw is empty at session start) and capture
+    # the wrist view once. verify() compares against this.
+    c.move(255.0, 0.0, 60.0, t=GRIP_CLOSED, speed=90.0)
+    c.spin(1.2)
+    c.claw_ref = c.wrist.copy() if c.wrist is not None else None
+    print(f'  [verify-ref] empty-claw reference '
+          f'{"captured" if c.claw_ref is not None else "UNAVAILABLE"}')
     root = Path(a.out)
     if a.record:
         root.mkdir(parents=True, exist_ok=True)
@@ -1226,6 +1263,15 @@ def main():
                     bx, by = scout_hovers.pop(0)
                     print(f'  [wrist-only] scout-aimed hover '
                           f'({bx:.0f},{by:.0f})')
+                    if a.gz is None:
+                        # depth-loft is UNMEASURABLE in the pick zone (the
+                        # RealSense min-range ~300mm blind band -- validated
+                        # 2026-08-16), so default to the mid-loft rung:
+                        # -212 held but plunged deeper than needed
+                        # (operator-observed "a little too deep")
+                        STRATEGIES[a.strategy]['gz'] = -203.0
+                        print('  [gz] scout default -203 (mid-loft; '
+                              'override with --gz)')
             print(f'  [wrist-only] nominal hover ({bx:.0f},{by:.0f}); '
                   'wrist cam localizes')
         else:
