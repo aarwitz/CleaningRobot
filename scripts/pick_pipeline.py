@@ -302,22 +302,31 @@ class PickPipeline(BallPick):
         fx, fy, cx, cy = self.K
         H, W = self.depth.shape[:2]
         pts = []
+        # Sample the FULL width: from the high tuck the center columns are
+        # clean floor, and the clutter (bag, chair leg, arm edge) is a
+        # minority the robust refit strips. A side-band-only mask
+        # concentrated sampling into exactly the object-rich margins and
+        # made things worse (resid 100mm; reverted 2026-08-16).
         for v in range(240, min(H, 474), 18):
-            for u in range(30, W - 30, 24):
-                if 170 < u < 470:
-                    # the tucked/OBSERVE arm hangs mid-frame and poisons the
-                    # fit (resid 66-86mm vs 18-45 with it excluded,
-                    # 2026-08-16); sample the side bands only
-                    continue
+            for u in range(30, W - 30, 32):
                 z = float(self.depth[v, u])
                 if 320.0 < z < 2600.0:
                     pts.append(((u - cx) * z / fx, (v - cy) * z / fy, z))
         if len(pts) < 30:
             return None
         P = np.asarray(pts)
-        ctr = P.mean(0)
-        n = np.linalg.svd(P - ctr)[2][2]
-        resid = float(np.abs((P - ctr) @ n).mean())
+
+        def fit(Q):
+            c_ = Q.mean(0)
+            n_ = np.linalg.svd(Q - c_)[2][2]
+            return n_, c_, np.abs((Q - c_) @ n_)
+        n, ctr, r_ = fit(P)
+        # robust refit: drop gross outliers (objects/arm edges in the band)
+        # and fit the floor from what remains
+        keep = P[r_ < 40.0]
+        if len(keep) >= 30:
+            n, ctr, r_ = fit(keep)
+        resid = float(r_.mean())
         return (n, float(n @ ctr), resid)
 
     def head_scout(self, prompt, rounds=3):
@@ -333,17 +342,28 @@ class PickPipeline(BallPick):
         >50mm) or the box bottom neared the horizon -- so reject bad
         planes, far/low-score projections, and anything not seen in >=2
         of `rounds` passes."""
-        self.move(*OBSERVE, t=GRIP_CLOSED, speed=100.0)
-        self.spin(0.8)
+        # HIGH TUCK, not OBSERVE: the head cam rides the BASE (arm pose is
+        # only occlusion), and the OBSERVE arm pose floods the depth band --
+        # plane resid 89-111mm there vs 19-22mm from the tuck (measured
+        # 2026-08-16; scout failed 4/4 sessions before this).
+        self.move(255.0, 0.0, 60.0, t=GRIP_CLOSED, speed=100.0)
+        self.spin(1.6)      # depth frames during/just after the move are junk
         fx, fy, cx, cy = self.K
         tx, ty = load_cal()
         clusters = []                     # each: [(ax, ay, score, box), ...]
         for k in range(rounds):
-            plane = self.floor_plane()
+            # transient depth garbage produces resid spikes (20 -> 70-100mm
+            # run to run from the same pose); retry within the round instead
+            # of burning the whole detection round on one bad snapshot
+            plane = None
+            for _try in range(3):
+                plane = self.floor_plane()
+                if plane is not None and plane[2] <= 50.0:
+                    break
+                self.spin(0.4)
             if plane is None or plane[2] > 50.0:
                 why = 'none' if plane is None else f'resid {plane[2]:.0f}mm'
                 print(f'  [scout] round {k + 1}: plane rejected ({why})')
-                self.spin(0.4)
                 continue
             n, d, _ = plane
             for det in self.head_yolo_dets_fresh():
@@ -563,6 +583,31 @@ class PickPipeline(BallPick):
                     (d_['box'][0] + d_['box'][2]) / 2 - anc['u'],
                     (d_['box'][1] + d_['box'][3]) / 2 - anc['v']))
         if anc is not None and lock_xy is not None:
+            # CROSS-CAMERA CONSISTENCY (2026-08-16): when the lock came from
+            # the head scout (target known to ~12mm), any det implying a
+            # position >100mm from it is provably NOT the target -- the
+            # black sock hid behind the claw and refine chased a corner det
+            # 140mm off-target instead of scanning on.
+            off = [d_ for d_ in dets if math.hypot(
+                bx + corr_of(d_['box'])[0] - lock_xy[0],
+                by + corr_of(d_['box'])[1] - lock_xy[1]) > 100.0]
+            for d_ in off:
+                dd = math.hypot(bx + corr_of(d_['box'])[0] - lock_xy[0],
+                                by + corr_of(d_['box'])[1] - lock_xy[1])
+                print(f'  [refine] off-target: det implies {dd:.0f}mm from '
+                      'the locked target -- rejecting')
+                self.fw_rejects.append(
+                    (d_['box'], f'off-target {dd:.0f}mm',
+                     d_.get('confidence') or d_.get('score') or 0))
+            dets = [d_ for d_ in dets if d_ not in off]
+            if not dets:
+                print('  [refine] no det consistent with the locked target')
+                self.publish_flywheel(
+                    self.wrist,
+                    {'stage': 'refine (wrist cam): off-target only',
+                     'label': prompt.split('.')[0]},
+                    cam='wrist', rejects=self.fw_rejects)
+                return bx, by, None
             # JUMP GATE (2026-08-16): a det implying a >150mm correction is
             # not the object we are hovering over -- it is a different object
             # at the frame edge (seen: px(601,235) -> raw 279mm yanked the
@@ -1254,15 +1299,19 @@ def main():
                     hx_ = math.sqrt(max(hr * hr - hy_ * hy_, 0.0))
                 return hx_, hy_
 
+            scout_lock = None
             if a.hover:
                 bx, by = (float(v) for v in a.hover.split(','))
             elif getattr(c, 'use_wrist_yolo', False):
-                scout_hovers = [hover_for(t[0], t[1])
+                # (hover_x, hover_y, scouted target) -- the target rides
+                # along as refine's lock for cross-camera consistency
+                scout_hovers = [(*hover_for(t[0], t[1]), (t[0], t[1]))
                                 for t in c.head_scout(a.prompt)]
                 if scout_hovers:
-                    bx, by = scout_hovers.pop(0)
+                    bx, by, scout_lock = scout_hovers.pop(0)
                     print(f'  [wrist-only] scout-aimed hover '
-                          f'({bx:.0f},{by:.0f})')
+                          f'({bx:.0f},{by:.0f}) locked on '
+                          f'({scout_lock[0]:.0f},{scout_lock[1]:.0f})')
                     if a.gz is None:
                         # depth-loft is UNMEASURABLE in the pick zone (the
                         # RealSense min-range ~300mm blind band -- validated
@@ -1308,18 +1357,24 @@ def main():
             if a.record else None
         bx0, by0 = bx, by
         bx, by, wrist_px = c.refine(bx, by, a.prompt, STRATEGIES[a.strategy]['gz'],
-                                    cap=140.0 if a.wrist_only else 65.0)
+                                    cap=140.0 if a.wrist_only else 65.0,
+                                    lock_xy=(scout_lock if a.wrist_only
+                                             else None))
         if a.wrist_only:
             if wrist_px is None:
-                # scan the remaining scout-aimed hovers first (fusion), then
-                # the fixed spots: dropped objects scatter beyond the single
-                # nominal hover's wrist FOV
-                for sx, sy in list(scout_hovers) + [
-                        (260.0, 70.0), (320.0, -70.0), (250.0, -70.0),
-                        (315.0, 60.0)]:
-                    print(f'  [wrist-only] scanning hover ({sx:.0f},{sy:.0f})')
+                # scan the remaining scout-aimed hovers first (fusion, each
+                # locked on its scouted target), then the fixed spots:
+                # dropped objects scatter beyond the single nominal hover's
+                # wrist FOV
+                for sx, sy, slock in list(scout_hovers) + [
+                        (260.0, 70.0, None), (320.0, -70.0, None),
+                        (250.0, -70.0, None), (315.0, 60.0, None)]:
+                    print(f'  [wrist-only] scanning hover ({sx:.0f},{sy:.0f})'
+                          + (f' locked ({slock[0]:.0f},{slock[1]:.0f})'
+                             if slock else ''))
                     bx, by, wrist_px = c.refine(sx, sy, a.prompt,
-                                                STRATEGIES[a.strategy]['gz'])
+                                                STRATEGIES[a.strategy]['gz'],
+                                                lock_xy=slock)
                     if wrist_px is not None:
                         break
             if wrist_px is None:
