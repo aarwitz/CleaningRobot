@@ -67,6 +67,12 @@ STRATEGIES = {
 }
 
 
+# Floor-grasp reach envelope. Was ~340 (empirical 2026-08-XX); operator
+# REDUCED to 320 on 2026-08-16: marginal far grasps kept failing and the
+# near-end retarget makes a tighter envelope affordable.
+FLOOR_REACH_R = 320.0
+
+
 class PickPipeline(BallPick):
     def __init__(self):
         super().__init__()
@@ -217,12 +223,18 @@ class PickPipeline(BallPick):
         from vision_msgs.msg import Detection2DArray
         self.wrist_yolo_msg = None
         self.wrist_yolo_t = 0.0
+        self.head_yolo_msg = None
 
         def _cb(m):
             self.wrist_yolo_msg = m
             self.wrist_yolo_t = time.time()
         self.create_subscription(Detection2DArray, '/wrist_yolo/detections',
                                  _cb, 5)
+
+        def _hcb(m):
+            self.head_yolo_msg = m
+        self.create_subscription(Detection2DArray, '/head_yolo/detections',
+                                 _hcb, 5)
         self.use_wrist_yolo = True
 
     def wrist_yolo_dets_fresh(self, timeout=3.5):
@@ -255,6 +267,127 @@ class PickPipeline(BallPick):
                                  cx + w_ / 2, cy + h_ / 2],
                          'score': score, 'confidence': score, 'label': 'sock'})
         return dets
+
+    def head_yolo_dets_fresh(self, timeout=3.0):
+        """Head-cam socks2 detections from a frame captured after now
+        (stamp-gated like the wrist variant), in 640x480 image pixels."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            self.spin(0.1)
+            m = getattr(self, 'head_yolo_msg', None)
+            if m is not None:
+                stamp = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+                if stamp >= t0:
+                    break
+        else:
+            return []
+        dets = []
+        for d in m.detections:
+            cx_ = d.bbox.center.position.x
+            cy_ = d.bbox.center.position.y - 80.0    # letterbox pad for 480
+            w_, h_ = d.bbox.size_x, d.bbox.size_y
+            score = max((r.hypothesis.score for r in d.results), default=0.0)
+            dets.append({'box': [cx_ - w_ / 2, cy_ - h_ / 2,
+                                 cx_ + w_ / 2, cy_ + h_ / 2],
+                         'score': score, 'confidence': score, 'label': 'sock'})
+        return dets
+
+    def floor_plane(self):
+        """SVD plane fit to the aligned depth's VALID band (>~320mm). The
+        floor is one rigid plane, so pixels inside the <300mm blind band can
+        still be localized by ray-plane intersection -- head 2D + fitted 3D
+        fusion instead of depth-at-pixel."""
+        if self.depth is None or not self.K:
+            return None
+        fx, fy, cx, cy = self.K
+        H, W = self.depth.shape[:2]
+        pts = []
+        for v in range(240, min(H, 474), 18):
+            for u in range(30, W - 30, 24):
+                if 170 < u < 470:
+                    # the tucked/OBSERVE arm hangs mid-frame and poisons the
+                    # fit (resid 66-86mm vs 18-45 with it excluded,
+                    # 2026-08-16); sample the side bands only
+                    continue
+                z = float(self.depth[v, u])
+                if 320.0 < z < 2600.0:
+                    pts.append(((u - cx) * z / fx, (v - cy) * z / fy, z))
+        if len(pts) < 30:
+            return None
+        P = np.asarray(pts)
+        ctr = P.mean(0)
+        n = np.linalg.svd(P - ctr)[2][2]
+        resid = float(np.abs((P - ctr) @ n).mean())
+        return (n, float(n @ ctr), resid)
+
+    def head_scout(self, prompt, rounds=3):
+        """FUSION (2026-08-16, operator request): head 2D dets + floor-plane
+        ray-cast -> arm (x,y) for every visible sock, INCLUDING inside the
+        head cam's depth-blind band. Replaces blind hover scanning (and the
+        operator --hover crutch) with aimed hovers. Contact point = box
+        bottom-center, which for an elongated sock is its graspable near
+        region (validated offline: 20/25 hits, std (21,1)mm).
+
+        Hardening from the offline validation: ghost projections at
+        r=1.5-3.2m appeared exactly when the plane fit degraded (resid
+        >50mm) or the box bottom neared the horizon -- so reject bad
+        planes, far/low-score projections, and anything not seen in >=2
+        of `rounds` passes."""
+        self.move(*OBSERVE, t=GRIP_CLOSED, speed=100.0)
+        self.spin(0.8)
+        fx, fy, cx, cy = self.K
+        tx, ty = load_cal()
+        clusters = []                     # each: [(ax, ay, score, box), ...]
+        for k in range(rounds):
+            plane = self.floor_plane()
+            if plane is None or plane[2] > 50.0:
+                why = 'none' if plane is None else f'resid {plane[2]:.0f}mm'
+                print(f'  [scout] round {k + 1}: plane rejected ({why})')
+                self.spin(0.4)
+                continue
+            n, d, _ = plane
+            for det in self.head_yolo_dets_fresh():
+                if det['score'] < 0.5:
+                    continue
+                b = det['box']
+                u_, v_ = (b[0] + b[2]) / 2, b[3]
+                ray = np.array([(u_ - cx) / fx, (v_ - cy) / fy, 1.0])
+                den = float(n @ ray)
+                if abs(den) < 1e-6:
+                    continue
+                X, _Y, Z = (d / den) * ray
+                if not (60.0 < Z < 4000.0):
+                    continue
+                ax, ay = Z + tx, -X + ty
+                if math.hypot(ax, ay) > 500.0:
+                    continue              # horizon-ray ghost
+                for cl in clusters:
+                    if math.hypot(ax - cl[0][0], ay - cl[0][1]) < 60.0:
+                        cl.append((ax, ay, det['score'], b))
+                        break
+                else:
+                    clusters.append([(ax, ay, det['score'], b)])
+        out = []
+        for cl in clusters:
+            if len(cl) < 2:               # temporal consistency: 2 of N
+                continue
+            ax = float(np.mean([p[0] for p in cl]))
+            ay = float(np.mean([p[1] for p in cl]))
+            sc = float(np.mean([p[2] for p in cl]))
+            out.append((ax, ay, sc, cl[-1][3]))
+            print(f'  [scout] sock {sc:.2f} ({len(cl)}/{rounds} rounds) -> '
+                  f'arm ({ax:.0f},{ay:.0f}) r={math.hypot(ax, ay):.0f}')
+        out.sort(key=lambda p_: math.hypot(p_[0], p_[1]))
+        if out and self.img is not None:
+            self.publish_flywheel(
+                self.img,
+                {'stage': 'scout (head 2D + floor-plane fusion)',
+                 'label': prompt.split('.')[0], 'score': out[0][2],
+                 'targets': [[round(t[0]), round(t[1])] for t in out]},
+                box=out[0][3], cam='head')
+        elif not out:
+            print('  [scout] no consistent targets')
+        return out
 
     def wrist_detect(self, prompt, conf=0.30):
         """Detector-agnostic wrist detection on the CURRENT wrist frame."""
@@ -402,9 +535,8 @@ class PickPipeline(BallPick):
         th = math.atan2(by, bx)
         cth, sth = math.cos(th), math.sin(th)
 
-        def corr_of(box_):
-            """px offset from anchor -> (dx,dy) arm-mm correction."""
-            u_, v_ = (box_[0] + box_[2]) / 2, (box_[1] + box_[3]) / 2
+        def corr_of_pt(u_, v_):
+            """px point offset from anchor -> (dx,dy) arm-mm correction."""
             du_, dv_ = u_ - anc['u'], v_ - anc['v']
             if 'Jinv' in anc:
                 Ji = anc['Jinv']
@@ -413,6 +545,11 @@ class PickPipeline(BallPick):
             else:
                 lx, ly = dv_ * anc['mm_per_px'], -du_ * anc['mm_per_px']
             return (cth * lx - sth * ly, sth * lx + cth * ly)
+
+        def corr_of(box_):
+            """px box-center offset from anchor -> (dx,dy) arm-mm."""
+            return corr_of_pt((box_[0] + box_[2]) / 2,
+                              (box_[1] + box_[3]) / 2)
 
         if anc is not None and len(dets) > 1:
             # cluttered scene: several valid objects in view. Pixel-space
@@ -475,6 +612,23 @@ class PickPipeline(BallPick):
         # axis mapping had the x sign backwards and corrected a far object
         # NEARER (attempt-5 short pick, operator-diagnosed).
         dx_mm, dy_mm = corr_of(wbox)
+        # ELONGATED-OBJECT RETARGET (2026-08-16): a sock is longer than the
+        # jaws, and one lying radially puts its CENTROID ~10cm beyond its
+        # graspable near end -- the reach gate refused a sock sitting
+        # directly under the gripper (operator-caught). If the centroid maps
+        # beyond floor-grasp reach but the box's near end (high-v: nearest
+        # the robot in the oblique wrist view) is inside it, grasp the near
+        # end instead.
+        if math.hypot(bx + dx_mm, by + dy_mm) > FLOOR_REACH_R:
+            nu = (wbox[0] + wbox[2]) / 2
+            nv = wbox[3] - 0.2 * (wbox[3] - wbox[1])
+            ndx, ndy = corr_of_pt(nu, nv)
+            if math.hypot(bx + ndx, by + ndy) <= FLOOR_REACH_R:
+                print(f'  [refine] centroid maps to '
+                      f'r={math.hypot(bx + dx_mm, by + dy_mm):.0f} (out of '
+                      f'reach); retargeting box near end px ({nu:.0f},{nv:.0f})')
+                wu, wv = nu, nv
+                dx_mm, dy_mm = ndx, ndy
         n = math.hypot(dx_mm, dy_mm)
         if n > cap:
             # log the raw magnitude: a consistently-capped correction is a
@@ -872,7 +1026,7 @@ def self_anchor(c, a):
         bx, by, wrist_px = c.refine(*nominal, a.prompt, gz, cap=140.0)
         if wrist_px is None:
             for sx, sy in ((260.0, 70.0), (320.0, -70.0),
-                           (250.0, -70.0), (340.0, 60.0)):
+                           (250.0, -70.0), (315.0, 60.0)):
                 bx, by, wrist_px = c.refine(sx, sy, a.prompt, gz, cap=140.0)
                 if wrist_px is not None:
                     break
@@ -1047,11 +1201,31 @@ def main():
         print(f'\n── {a.object} attempt {ep+1}/{a.episodes} ──')
         if a.wrist_only:
             # the head cam cannot depth-localize inside the arm's workspace
-            # (blind <300mm, box hits frame bottom); the wrist cam owns
-            # anything already in reach
+            # (blind <300mm, box hits frame bottom) -- but with the fused
+            # floor plane (head_scout) its 2D detections still aim the
+            # hovers; the wrist cam owns the final localization
             bx, by, why, u0 = 300.0, 0.0, 'ok', None
+            scout_hovers = []
+
+            def hover_for(px_, py_):
+                """Nearest safe hover along the target's bearing."""
+                r_, th_ = math.hypot(px_, py_), math.atan2(py_, px_)
+                hr = max(200.0, min(315.0, r_ - 50.0))
+                hx_, hy_ = hr * math.cos(th_), hr * math.sin(th_)
+                if abs(hy_) > 100.0:
+                    hy_ = math.copysign(100.0, hy_)
+                    hx_ = math.sqrt(max(hr * hr - hy_ * hy_, 0.0))
+                return hx_, hy_
+
             if a.hover:
                 bx, by = (float(v) for v in a.hover.split(','))
+            elif getattr(c, 'use_wrist_yolo', False):
+                scout_hovers = [hover_for(t[0], t[1])
+                                for t in c.head_scout(a.prompt)]
+                if scout_hovers:
+                    bx, by = scout_hovers.pop(0)
+                    print(f'  [wrist-only] scout-aimed hover '
+                          f'({bx:.0f},{by:.0f})')
             print(f'  [wrist-only] nominal hover ({bx:.0f},{by:.0f}); '
                   'wrist cam localizes')
         else:
@@ -1091,10 +1265,12 @@ def main():
                                     cap=140.0 if a.wrist_only else 65.0)
         if a.wrist_only:
             if wrist_px is None:
-                # scan other in-reach hover spots: dropped objects scatter
-                # beyond the single nominal hover's wrist FOV
-                for sx, sy in ((260.0, 70.0), (320.0, -70.0), (250.0, -70.0),
-                               (340.0, 60.0)):
+                # scan the remaining scout-aimed hovers first (fusion), then
+                # the fixed spots: dropped objects scatter beyond the single
+                # nominal hover's wrist FOV
+                for sx, sy in list(scout_hovers) + [
+                        (260.0, 70.0), (320.0, -70.0), (250.0, -70.0),
+                        (315.0, 60.0)]:
                     print(f'  [wrist-only] scanning hover ({sx:.0f},{sy:.0f})')
                     bx, by, wrist_px = c.refine(sx, sy, a.prompt,
                                                 STRATEGIES[a.strategy]['gz'])
@@ -1129,11 +1305,11 @@ def main():
             # command -- the pick shorts every time. Skip; it needs a base
             # move, not more arm.
             rng_ = math.hypot(bx, by)
-            if rng_ > 340.0:
+            if rng_ > FLOOR_REACH_R:
                 print(f'  [wrist-only] target r={rng_:.0f} is beyond floor-'
-                      'grasp reach (~340)')
+                      f'grasp reach (~{FLOOR_REACH_R:.0f})')
                 near = [(nx, ny) for nx, ny in getattr(c, 'neighbors', [])
-                        if math.hypot(nx, ny) <= 340.0]
+                        if math.hypot(nx, ny) <= FLOOR_REACH_R]
                 if near:
                     bx, by = min(near, key=lambda p_: math.hypot(*p_))
                     print(f'  [wrist-only] retargeting in-reach neighbor '
@@ -1141,7 +1317,7 @@ def main():
                     bx, by, wrist_px = c.refine(bx, by, a.prompt,
                                                 STRATEGIES[a.strategy]['gz'],
                                                 lock_xy=(bx, by))
-                if wrist_px is None or math.hypot(bx, by) > 340.0:
+                if wrist_px is None or math.hypot(bx, by) > FLOOR_REACH_R:
                     print('  [wrist-only] nothing in reach -- skipping; '
                           'needs a base move')
                     miss_n += 1
