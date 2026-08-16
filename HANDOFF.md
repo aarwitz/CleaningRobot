@@ -281,6 +281,22 @@ existing checkpoint.
   (operator-confirmed). Wrist-frame claw grouping = socks2 OOD -> the
   pseudo-label/fine-tune with wrist frames is the durable detector fix.
 
+## 7d. Batch certification 2026-08-16 (end of day)
+
+5-episode unattended batch on the yolo+fusion pipeline: **2 held / 3
+missed, all 5 labels frame-audited truthful** (holds: claw-diff 40.1 &
+36.8 with the sock visibly clamped; misses: 5.5/3.1 empty + one honest
+out-of-reach skip). hard_lock/soft-lock separation landed: the off-target
+gate keys only on scout-measured targets, parallax self-locks are
+sorting-only.
+
+OPEN CALIBRATION ITEM: at the scout-aimed close hover (~r=195) the
+wrist-implied det positions disagree with the scout target by a
+CONSISTENT 168-186mm across every attempt -- picks succeed via the scan
+hovers instead. Systematic, not noise; suspect anchor/Jacobian validity
+at that close geometry. Re-run `robot calibrate` / self-anchor from a
+~195mm hover, or map px->mm scale vs hover radius.
+
 ## 8. Operating notes / gotchas
 
 - Config truth lives in `docker/docker-compose.yml` env vars, **not** the launch

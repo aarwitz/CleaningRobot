@@ -464,7 +464,7 @@ class PickPipeline(BallPick):
 
     # ── refine: wrist cam from the pre-grasp hover ──────────────────────────
     def refine(self, bx, by, prompt, gz, cap=65.0, lock_xy=None,
-               claw_whitelist=None):
+               claw_whitelist=None, hard_lock=None):
         """Hover above the coarse target, detect in the WRIST frame, correct
         (bx, by) by the offset from the grasp anchor. Returns possibly
         corrected (bx, by); no-ops gracefully without wrist frames/anchor."""
@@ -532,6 +532,7 @@ class PickPipeline(BallPick):
                       'real floor object, not the claw')
                 return self.refine(bx, by, prompt, gz, cap=cap,
                                    lock_xy=lock_xy or (bx, by),
+                                   hard_lock=hard_lock,
                                    claw_whitelist=mobile)
             print('  [refine] parallax: detections static -> genuinely the '
                   'claw')
@@ -582,18 +583,20 @@ class PickPipeline(BallPick):
                 dets.sort(key=lambda d_: math.hypot(
                     (d_['box'][0] + d_['box'][2]) / 2 - anc['u'],
                     (d_['box'][1] + d_['box'][3]) / 2 - anc['v']))
-        if anc is not None and lock_xy is not None:
-            # CROSS-CAMERA CONSISTENCY (2026-08-16): when the lock came from
-            # the head scout (target known to ~12mm), any det implying a
-            # position >100mm from it is provably NOT the target -- the
-            # black sock hid behind the claw and refine chased a corner det
-            # 140mm off-target instead of scanning on.
+        if anc is not None and hard_lock is not None:
+            # CROSS-CAMERA CONSISTENCY (2026-08-16): a HARD lock is a
+            # scout-measured target (known to ~12mm) -- any det implying a
+            # position >100mm from it is provably NOT the target. Strictly
+            # scout locks: the parallax recursion's self-lock (the hover
+            # position) is only a sorting preference, and gating on it
+            # rejected a parallax-PROVEN sock legitimately ~140mm out
+            # during scans (cost two hovers in the staged test).
             off = [d_ for d_ in dets if math.hypot(
-                bx + corr_of(d_['box'])[0] - lock_xy[0],
-                by + corr_of(d_['box'])[1] - lock_xy[1]) > 100.0]
+                bx + corr_of(d_['box'])[0] - hard_lock[0],
+                by + corr_of(d_['box'])[1] - hard_lock[1]) > 100.0]
             for d_ in off:
-                dd = math.hypot(bx + corr_of(d_['box'])[0] - lock_xy[0],
-                                by + corr_of(d_['box'])[1] - lock_xy[1])
+                dd = math.hypot(bx + corr_of(d_['box'])[0] - hard_lock[0],
+                                by + corr_of(d_['box'])[1] - hard_lock[1])
                 print(f'  [refine] off-target: det implies {dd:.0f}mm from '
                       'the locked target -- rejecting')
                 self.fw_rejects.append(
@@ -1359,7 +1362,9 @@ def main():
         bx, by, wrist_px = c.refine(bx, by, a.prompt, STRATEGIES[a.strategy]['gz'],
                                     cap=140.0 if a.wrist_only else 65.0,
                                     lock_xy=(scout_lock if a.wrist_only
-                                             else None))
+                                             else None),
+                                    hard_lock=(scout_lock if a.wrist_only
+                                               else None))
         if a.wrist_only:
             if wrist_px is None:
                 # scan the remaining scout-aimed hovers first (fusion, each
@@ -1374,7 +1379,8 @@ def main():
                              if slock else ''))
                     bx, by, wrist_px = c.refine(sx, sy, a.prompt,
                                                 STRATEGIES[a.strategy]['gz'],
-                                                lock_xy=slock)
+                                                lock_xy=slock,
+                                                hard_lock=slock)
                     if wrist_px is not None:
                         break
             if wrist_px is None:
