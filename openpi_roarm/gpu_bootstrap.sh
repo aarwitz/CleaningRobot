@@ -13,33 +13,50 @@
 # plus the demos (either a demos/ dir or demos.tar next to this script).
 #
 # Usage:
-#   ./gpu_bootstrap.sh [--space cartesian|joint] [--demos ./demos] [--train]
+#   ./gpu_bootstrap.sh [--space cartesian|joint] [--demos ./demos ...] [--train]
+#                      [--wrist] [--include-misses]
 #
 # --train also kicks off training at the end instead of just printing the cmd.
+# --wrist trains the dual-camera config (pi0_roarm_sock_cartesian_wrist_lora):
+#   head + wrist views; episodes without paired frames_wrist/ are skipped.
+# --include-misses keeps success=false episodes (recovery data).
+# --demos may be given more than once to combine roots (e.g. demos demos/picks).
 set -euo pipefail
 # Explicit failure marker: monitors must grep for "SETUP OK" / "BOOTSTRAP FAILED"
 # rather than inferring health from process liveness (which lies).
 trap 'echo "BOOTSTRAP FAILED (line $LINENO: $BASH_COMMAND)"' ERR
 
 SPACE=cartesian
-DEMOS=./demos
+DEMOS=()
 DO_TRAIN=0
+WRIST=0
+MISSES=0
 HERE="$(cd "$(dirname "$0")" && pwd)"
 while [ $# -gt 0 ]; do
   case "$1" in
     --space) SPACE="$2"; shift 2;;
-    --demos) DEMOS="$2"; shift 2;;
+    --demos) DEMOS+=("$2"); shift 2;;
     --train) DO_TRAIN=1; shift;;
+    --wrist) WRIST=1; shift;;
+    --include-misses) MISSES=1; shift;;
     *) echo "unknown arg: $1"; exit 2;;
   esac
 done
+[ ${#DEMOS[@]} -gt 0 ] || DEMOS=(./demos)
 REPO_ID="roarm_sock_${SPACE}"
 # config names must match those built in roarm_inject_block.py
-if [ "$SPACE" = joint ]; then
+if [ "$WRIST" = 1 ]; then
+  [ "$SPACE" = cartesian ] || { echo "--wrist config exists for cartesian only"; exit 2; }
+  REPO_ID="roarm_sock_cartesian_wrist"
+  CONFIG="pi0_roarm_sock_cartesian_wrist_lora"
+elif [ "$SPACE" = joint ]; then
   CONFIG="pi0_roarm_sock_lora"
 else
   CONFIG="pi0_roarm_sock_cartesian_lora"
 fi
+CONVERT_FLAGS=()
+[ "$WRIST" = 1 ] && CONVERT_FLAGS+=(--wrist)
+[ "$MISSES" = 1 ] && CONVERT_FLAGS+=(--include-misses)
 
 say() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 
@@ -51,26 +68,30 @@ nvidia-smi -L
 [ -f "$HERE/roarm_policy.py" ] || { echo "missing roarm_policy.py next to script"; exit 1; }
 [ -f "$HERE/roarm_inject_block.py" ] || { echo "missing roarm_inject_block.py"; exit 1; }
 
-# Locate the demos. Accept an existing dir, else unpack demos.tar from any of
+# Locate the demos. Accept existing dirs, else unpack demos.tar from any of
 # the places it plausibly landed (beside the script, the parent dir -- e.g.
 # `scp -r openpi_roarm demos.tar host:~/` puts them as siblings -- or $PWD).
-if [ ! -d "$DEMOS" ]; then
+if [ ! -d "${DEMOS[0]}" ] && [ ${#DEMOS[@]} -eq 1 ]; then
   for d in "$HERE" "$HERE/.." "$PWD"; do
-    if [ -d "$d/demos" ]; then DEMOS="$d/demos"; break; fi
+    if [ -d "$d/demos" ]; then DEMOS=("$d/demos"); break; fi
     if [ -f "$d/demos.tar" ]; then
       say "unpacking $d/demos.tar"
       # --no-same-owner: network volumes (e.g. RunPod /workspace on MooseFS)
       # refuse chown even for root, and a failed chown fails tar entirely.
       tar --no-same-owner -xf "$d/demos.tar" -C "$d"
-      DEMOS="$d/demos"; break
+      DEMOS=("$d/demos"); break
     fi
   done
 fi
-if [ ! -d "$DEMOS" ]; then
-  echo "no demos found. Put demos.tar (or a demos/ dir) beside this script,"
-  echo "in its parent dir, or pass --demos /path/to/demos"; exit 1
-fi
-echo "demos: $(ls -d "$DEMOS"/ep_* | wc -l) episodes"
+N_EPS=0
+for root in "${DEMOS[@]}"; do
+  if [ ! -d "$root" ]; then
+    echo "demos root not found: $root. Put demos.tar (or a demos/ dir) beside"
+    echo "this script, in its parent dir, or pass --demos /path/to/demos"; exit 1
+  fi
+  N_EPS=$((N_EPS + $(ls -d "$root"/ep_* 2>/dev/null | wc -l)))
+done
+echo "demos: $N_EPS episodes across ${#DEMOS[@]} root(s)"
 
 # 1. openpi
 if [ ! -d "$HOME/openpi" ]; then
@@ -100,8 +121,9 @@ if [ -d "$DS_DIR/meta" ]; then
 else
   say "building LeRobot dataset ($SPACE space) -> $REPO_ID"
   uv run python "$HERE/convert_roarm_to_lerobot.py" \
-      --demos "$DEMOS" --repo-id "$REPO_ID" --space "$SPACE" \
-      --prompt "pick up the sock"
+      --demos "${DEMOS[@]}" --repo-id "$REPO_ID" --space "$SPACE" \
+      --prompt "pick up the sock" \
+      ${CONVERT_FLAGS[@]+"${CONVERT_FLAGS[@]}"}
 fi
 
 # 4. norm stats  (LOADS the config + dataset end to end == integration test)
@@ -110,20 +132,22 @@ say "compute_norm_stats ($CONFIG) -- this validates the whole config/data path"
 uv run scripts/compute_norm_stats.py "$CONFIG" \
   || uv run scripts/compute_norm_stats.py --config-name "$CONFIG"
 
+EXP=sock_v1
+[ "$WRIST" = 1 ] && EXP=sock_v2_wrist
 say "SETUP OK"
 cat <<EOF
 
 Next:
   cd ~/openpi
   # train (LoRA, ~30k steps; watch the first ~200 steps for a falling loss):
-  uv run scripts/train.py $CONFIG --exp-name sock_v1
+  uv run scripts/train.py $CONFIG --exp-name $EXP
   # then serve the checkpoint:
   uv run scripts/serve_policy.py --config $CONFIG \\
-      --checkpoint checkpoints/$CONFIG/sock_v1/<step>
+      --checkpoint checkpoints/$CONFIG/$EXP/<step>
 
 EOF
 
 if [ "$DO_TRAIN" = 1 ]; then
   say "starting training ($CONFIG)"
-  uv run scripts/train.py "$CONFIG" --exp-name sock_v1
+  uv run scripts/train.py "$CONFIG" --exp-name "$EXP"
 fi

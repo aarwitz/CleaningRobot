@@ -87,6 +87,11 @@ class PiBridge(Node):
         self.declare_parameter('server_host', 'localhost')
         self.declare_parameter('server_port', 8000)
         self.declare_parameter('camera_topic', '/camera/color/image_raw/compressed')
+        # Wrist camera for dual-view checkpoints (pi0_roarm_sock_cartesian_
+        # wrist_lora). Empty = head-only, matching the v1 checkpoint; a
+        # wrist-trained policy served WITHOUT this gets a masked-off wrist at
+        # rollout -- a silent train/serve mismatch, so set it when serving v2+.
+        self.declare_parameter('wrist_topic', '')
         self.declare_parameter('policy_style', 'roarm')   # 'roarm' | 'droid'
         self.declare_parameter('exec_rate_hz', 15.0)      # demo recording rate
         self.declare_parameter('exec_steps', 25)          # chunk prefix to run
@@ -99,6 +104,7 @@ class PiBridge(Node):
         self.style = self.get_parameter('policy_style').value
 
         self.latest_jpeg = None
+        self.latest_wrist_jpeg = None
         self.teleop = None          # last /teleop/state dict
         self.teleop_t = 0.0
         self.prompt = 'pick up the sock'
@@ -112,6 +118,10 @@ class PiBridge(Node):
         self.create_subscription(CompressedImage,
                                  self.get_parameter('camera_topic').value,
                                  self.on_image, 5)
+        self.wrist_topic = self.get_parameter('wrist_topic').value
+        if self.wrist_topic:
+            self.create_subscription(CompressedImage, self.wrist_topic,
+                                     self.on_wrist_image, 5)
         self.create_subscription(String, '/teleop/state', self.on_teleop, 5)
         self.create_subscription(String, '/pi/request', self.on_request, 5)
         self.result_pub = self.create_publisher(String, '/pi/result', 5)
@@ -123,6 +133,9 @@ class PiBridge(Node):
 
     def on_image(self, msg):
         self.latest_jpeg = bytes(msg.data)
+
+    def on_wrist_image(self, msg):
+        self.latest_wrist_jpeg = bytes(msg.data)
 
     def on_teleop(self, msg):
         try:
@@ -197,11 +210,22 @@ class PiBridge(Node):
         state = self.arm_state()
         if state is None:
             return None
-        return {
+        obs = {
             'observation/image': resize_with_pad(img, 224, 224),
             'observation/state': state,
             'prompt': self.prompt,
         }
+        if self.wrist_topic:
+            # a wrist-trained policy must never silently get a stale/absent
+            # wrist view: refuse instead (same doctrine as arm_state)
+            if self.latest_wrist_jpeg is None:
+                return 'no-wrist'
+            import cv2
+            wimg = cv2.imdecode(
+                np.frombuffer(self.latest_wrist_jpeg, np.uint8),
+                cv2.IMREAD_COLOR)[:, :, ::-1]           # BGR -> RGB
+            obs['observation/wrist_image'] = resize_with_pad(wimg, 224, 224)
+        return obs
 
     def infer_once(self):
         """One inference. Returns the (horizon, dims) action array or None."""
@@ -216,6 +240,10 @@ class PiBridge(Node):
         obs = self.build_obs(img)
         if obs is None:
             self.publish_error('no fresh /teleop/state — is teleop_node up?')
+            return None
+        if obs == 'no-wrist':
+            self.publish_error(f'no wrist frame on {self.wrist_topic} — '
+                               'refusing to infer with a masked wrist view')
             return None
         t0 = time.time()
         try:

@@ -5,9 +5,10 @@ Copy this into an openpi checkout at `src/openpi/policies/roarm_policy.py`
 
 The pi0 model works in a fixed padded action/state dimension (`action_dim`, 32
 by default) and a 3-camera image dict (base + two wrists). Our robot has 4 real
-DoF and ONE camera, so:
-  * RoarmInputs pads state/actions 4 -> action_dim and fills only base_0_rgb,
-    masking the two wrist slots OFF (the model then ignores them).
+DoF and a head cam plus an optional wrist cam, so:
+  * RoarmInputs pads state/actions 4 -> action_dim, fills base_0_rgb, and --
+    when `observation/wrist_image` is present -- left_wrist_0_rgb; every image
+    slot without real data is masked OFF (the model then ignores it).
   * RoarmOutputs slices the model's action back down to our 4 real dims.
 """
 import dataclasses
@@ -37,18 +38,23 @@ class RoarmInputs(transforms.DataTransformFn):
         state = transforms.pad_to_dim(data["observation/state"], self.action_dim)
         base_image = _parse_image(data["observation/image"])
 
-        # One real camera. pi0 wants a 3-cam dict; mask the two we don't have.
+        # pi0 wants a 3-cam dict; fill what we have, mask the rest OFF.
+        # The wrist cam matters: the grasp happens inside the head cam's
+        # depth-blind zone (<300mm) where the arm occludes the object -- a
+        # head-only policy is asked to close a grip it cannot see.
         zeros = np.zeros_like(base_image)
+        wrist = data.get("observation/wrist_image")
+        wrist_image = _parse_image(wrist) if wrist is not None else zeros
         inputs = {
             "state": state,
             "image": {
                 "base_0_rgb": base_image,
-                "left_wrist_0_rgb": zeros,
+                "left_wrist_0_rgb": wrist_image,
                 "right_wrist_0_rgb": zeros,
             },
             "image_mask": {
                 "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.False_,
+                "left_wrist_0_rgb": np.bool_(wrist is not None),
                 "right_wrist_0_rgb": np.False_,
             },
         }

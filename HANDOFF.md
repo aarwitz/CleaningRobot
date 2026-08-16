@@ -221,10 +221,21 @@ existing checkpoint.
 ## 7. Next steps, in priority order
 
 1. ~~**`robot halt` mode**~~ DONE 2026-08-16 (see §5.3).
-2. **Retrain π0** on the ~78 newer episodes + the original 50, from *this* room,
-   misses included. `openpi_roarm/gpu_bootstrap.sh` does the mechanical setup;
-   ~8 h / ~$4 on RunPod. This is the highest-value move and needs neither the
-   robot nor the operator.
+2. **Retrain π0 — now dual-camera.** The whole wrist path was wired
+   2026-08-16: converter `--wrist --include-misses` (fixing the converter's
+   silent miss-skipping, which contradicted this very plan), new config
+   `pi0_roarm_sock_cartesian_wrist_lora` (repo `roarm_sock_cartesian_wrist`;
+   a NEW name so the served v1 checkpoint keeps its exact inputs), policy
+   fills `left_wrist_0_rgb` + mask, `pi_bridge` gained `wrist_topic` for
+   serving (refuses to infer on a missing wrist frame — no silent
+   train/serve mismatch). Rationale: the grasp happens in the head cam's
+   depth-blind zone — v1 hovers without closing because it cannot SEE the
+   grasp. On the GPU box:
+   `./gpu_bootstrap.sh --wrist --include-misses --demos demos/picks --train`
+   (~8 h / ~$4 on RunPod; needs neither the robot nor the operator).
+   Coverage note: all 78 picks episodes have paired wrist frames except
+   ep_0035 (wrist died mid-episode; auto-skipped). The 15 older demos/ep_*
+   are head-only and excluded in wrist mode.
 3. **Fix the evaluator**, then re-baseline π0 honestly (§5.5).
 4. **Wrist YOLO**: second `yolo_trt_py` instance on `/wrist_cam/image_raw`;
    prefer it over DINO for socks in `refine()`. Removes the tunnel from the
@@ -235,6 +246,16 @@ existing checkpoint.
    mobile pick→carry→place (tasks #24/#25).
 
 ---
+
+## 7b. Changes 2026-08-16 (this session)
+
+- `robot classic` mode + `docker/docker-compose.classic.yml`: sanctioned way to
+  run the original YOLO 2D→depth→3D→arm_bridge autonomous pipeline (§ mode
+  table). Compose override, never edits the base yaml; bring-up gates the loop.
+- `robot halt` + `pick_pipeline` SIGINT/SIGTERM trap (§5.3 — DONE).
+- Wrist-camera training path end to end (§7.2): converter/config/policy/bridge.
+- Committed `6515805` (prior session's 15-file working tree) on
+  `sock-demos-and-pi-finetune`; not yet pushed.
 
 ## 8. Operating notes / gotchas
 

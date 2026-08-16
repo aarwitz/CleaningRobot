@@ -15,14 +15,22 @@ from openpi.policies import roarm_policy as _roarm_policy
 
 @_rdc.dataclass(frozen=True)
 class RoarmDataConfig(DataConfigFactory):
+    # True -> the dataset carries observation.images.wrist (converter --wrist)
+    # and the policy fills left_wrist_0_rgb with it. The grasp happens in the
+    # head cam's depth-blind zone, so the wrist view is what actually sees it.
+    use_wrist: bool = False
+
     def create(self, assets_dirs, model_config):
         # rename our LeRobot dataset keys -> the keys RoarmInputs reads
-        repack = _rtf.Group(inputs=[_rtf.RepackTransform({
+        keymap = {
             "observation/image": "observation.images.exterior",
             "observation/state": "observation.state",
             "actions": "action",
             "prompt": "prompt",
-        })])
+        }
+        if self.use_wrist:
+            keymap["observation/wrist_image"] = "observation.images.wrist"
+        repack = _rtf.Group(inputs=[_rtf.RepackTransform(keymap)])
         # robot <-> model tensors (pad/mask in, slice 4 DoF out)
         data_transforms = _rtf.Group(
             inputs=[_roarm_policy.RoarmInputs(
@@ -76,6 +84,28 @@ _ROARM_CONFIGS = [
     )
     for _sp in ("cartesian", "joint")
 ]
+
+# Dual-camera (head + wrist) config -- a NEW name on purpose: the served v1
+# checkpoint (pi0_sock_v1) belongs to pi0_roarm_sock_cartesian_lora and must
+# keep seeing exactly the inputs it was trained on. Dataset built with
+# `convert_roarm_to_lerobot.py --wrist [--include-misses]`.
+_ROARM_CONFIGS.append(
+    TrainConfig(
+        name="pi0_roarm_sock_cartesian_wrist_lora",
+        model=_roarm_lora_model(),
+        data=RoarmDataConfig(
+            repo_id="roarm_sock_cartesian_wrist",
+            use_wrist=True,
+            base_config=DataConfig(prompt_from_task=True,
+                                   action_sequence_keys=("action",)),
+        ),
+        weight_loader=_rwl.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=5_000,
+        freeze_filter=_roarm_lora_model().get_freeze_filter(),
+        ema_decay=None,
+    )
+)
 
 # register (both the list and the name->config dict, which is built above at
 # import time and therefore does not see late additions to _CONFIGS)
