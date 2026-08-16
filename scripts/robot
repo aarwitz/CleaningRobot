@@ -1,0 +1,490 @@
+#!/usr/bin/env python3
+"""The ONLY sanctioned entrypoint for operating the robot.
+
+Every way of moving the arm goes through one of the vetted modes below --
+no ad-hoc python snippets, no bespoke docker-exec one-liners. Guarantees:
+
+  * MUTEX     one mode runs at a time (flock); a second invocation refuses.
+  * PREFLIGHT each mode checks its dependencies (teleop link, wrist cam,
+              DINO tunnel, pi server) BEFORE any motion command.
+  * AUDIT     every invocation is appended to ~/robot_runs.log with
+              timestamp, mode, args, and exit code.
+  * VETTED    only allowlisted flags reach the underlying scripts.
+
+Modes:
+  robot status                          health snapshot, moves nothing
+  robot pick   --object X --prompt "Y" [--episodes N] [--record]
+               [--strategy S] [--gz Z] [--drop-at "x,y"]
+  robot pi     --prompt "pick up the sock" [--execute]
+  robot calibrate                       re-measure wrist px->mm Jacobian
+  robot anchor --object X --prompt "Y"  self-anchor (grasp-drop-observe)
+  robot viz                             repair the console data path (no motion)
+  robot classic [--go|--halt|--off]     classic YOLO 2D->3D depth pick pipeline
+  robot halt                            safe stop: kill pipelines, disarm pi,
+                                        lift to tucked pose (grip closed)
+  robot stow                            tucked safe pose, gripper open
+  robot estop                           software E-STOP
+"""
+import argparse
+import datetime
+import fcntl
+import json
+import os
+import shlex
+import socket
+import subprocess
+import sys
+import time
+
+CONTAINER = 'docker-vision-1'
+LOCK_FILE = '/tmp/robot_mode.lock'
+LOG_FILE = os.path.expanduser('~/robot_runs.log')
+SETUP = 'source /opt/vision_ws/install/setup.bash'
+WS = '/scripts'     # scripts/ bind-mount inside the container
+COMPOSE_DIR = os.path.expanduser('~/workspaces/CleaningRobot/docker')
+COMPOSE_TELEOP = ['docker', 'compose', '-f', 'docker-compose.yml']
+COMPOSE_CLASSIC = COMPOSE_TELEOP + ['-f', 'docker-compose.classic.yml']
+
+
+def in_container(cmd, timeout=None, capture=False):
+    full = ['docker', 'exec', CONTAINER, 'bash', '-c', f'{SETUP} && {cmd}']
+    return subprocess.run(full, timeout=timeout, text=True,
+                          capture_output=capture)
+
+
+def in_container_tty(cmd):
+    """Interactive/streaming variant: inherits our stdio."""
+    return subprocess.call(['docker', 'exec', '-i', CONTAINER, 'bash', '-c',
+                            f'{SETUP} && {cmd}'])
+
+
+def port_open(port, host='localhost', timeout=2.0):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def current_profile():
+    """'classic' or 'teleop', derived from the RUNNING container's env
+    (docker inspect) -- ground truth, not a marker file that can go stale."""
+    r = subprocess.run(['docker', 'inspect', CONTAINER,
+                        '--format', '{{json .Config.Env}}'],
+                       capture_output=True, text=True)
+    try:
+        env = dict(e.split('=', 1) for e in json.loads(r.stdout))
+    except (json.JSONDecodeError, ValueError):
+        return 'teleop'   # container missing/odd: assume default profile
+    if env.get('ENABLE_ARM') == 'true' and env.get('ENABLE_TELEOP') == 'false':
+        return 'classic'
+    return 'teleop'
+
+
+def set_arm_loop(active):
+    """Gate arm_bridge's autonomous pick loop via /arm_bridge/set_active."""
+    r = in_container(
+        'timeout 10 ros2 service call /arm_bridge/set_active '
+        f"std_srvs/srv/SetBool '{{data: {str(bool(active)).lower()}}}'",
+        timeout=20, capture=True)
+    ok = 'success=True' in (r.stdout or '')
+    return ok, (r.stdout or r.stderr or '').strip().splitlines()[-1:]
+
+
+# ── preflight probes (read-only; never move anything) ────────────────────────
+def probe_teleop():
+    r = in_container('timeout 8 ros2 topic echo /teleop/state --once',
+                     timeout=15, capture=True)
+    ok = '"link": "ok"' in (r.stdout or '')
+    estop = '"estop": true' in (r.stdout or '')
+    return ok and not estop, ('estop engaged' if estop else
+                              'link not ok / no state' if not ok else 'ok')
+
+
+def probe_wrist():
+    r = in_container('timeout 6 ros2 topic hz /wrist_cam/image_raw/compressed '
+                     '--window 10 2>&1 | head -2', timeout=12, capture=True)
+    ok = 'average rate' in (r.stdout or '')
+    return ok, 'ok' if ok else 'no wrist frames'
+
+
+def probe_dino():
+    r = subprocess.run(['curl', '-s', '-m', '3', '-o', '/dev/null',
+                        '-w', '%{http_code}', 'http://localhost:8002/'],
+                       capture_output=True, text=True)
+    ok = r.stdout.strip() == '200'
+    return ok, 'ok' if ok else 'DINO tunnel down (localhost:8002)'
+
+
+def probe_pi_server():
+    r = subprocess.run(['curl', '-s', '-m', '3', '-o', '/dev/null',
+                        '-w', '%{http_code}', 'http://localhost:8000/'],
+                       capture_output=True, text=True)
+    ok = r.stdout.strip() not in ('000', '')
+    return ok, 'ok' if ok else 'pi server tunnel down (localhost:8000)'
+
+
+def preflight(names):
+    probes = {'teleop': probe_teleop, 'wrist': probe_wrist,
+              'dino': probe_dino, 'pi': probe_pi_server}
+    all_ok = True
+    for n in names:
+        ok, why = probes[n]()
+        print(f'  [preflight] {n}: {why}')
+        all_ok &= ok
+    return all_ok
+
+
+def audit(mode, argv, code):
+    line = json.dumps({'ts': datetime.datetime.now().isoformat(timespec='seconds'),
+                       'mode': mode, 'args': argv, 'exit': code})
+    with open(LOG_FILE, 'a') as f:
+        f.write(line + '\n')
+
+
+# ── modes ────────────────────────────────────────────────────────────────────
+def mode_status(_a):
+    print(f'  [status] profile: {current_profile()}')
+    preflight(['teleop', 'wrist', 'dino', 'pi'])
+    return 0
+
+
+def mode_pick(a):
+    if not preflight(['teleop', 'wrist', 'dino']):
+        return 2
+    cmd = (f'python3 {WS}/pick_pipeline.py --wrist-only '
+           f'--object {shlex.quote(a.object)} --prompt {shlex.quote(a.prompt)} '
+           f'--strategy {a.strategy} --episodes {a.episodes}')
+    if a.record:
+        cmd += ' --record'
+    if a.gz is not None:
+        cmd += f' --gz {a.gz}'
+    if a.drop_at:
+        cmd += f' --drop-at {shlex.quote(a.drop_at)}'
+    return in_container_tty(cmd)
+
+
+def mode_pi(a):
+    checks = ['teleop', 'pi']
+    if not preflight(checks):
+        return 2
+    req = {'prompt': a.prompt, 'mode': 'execute' if a.execute else 'once'}
+    # bridge assumed running (launch stack); publish the request and stream results
+    pub = (f"ros2 topic pub --once /pi/request std_msgs/String "
+           f"'{{data: {json.dumps(json.dumps(req))}}}'")
+    r = in_container(pub, timeout=20, capture=True)
+    if r.returncode != 0:
+        print(r.stderr or r.stdout)
+        return r.returncode
+    # BOUNDED echo: an unbounded `ros2 topic echo` survives our own timeout
+    # (docker exec kills the client, not the in-container process) and leaks a
+    # subscriber per invocation -- 8 of them were found orphaned 2026-08-15.
+    print(f'  request sent ({req["mode"]}); /pi/result for {a.watch_s:.0f}s')
+    return in_container_tty(f'timeout {a.watch_s:.0f} ros2 topic echo '
+                            '/pi/result || true')
+
+
+def mode_calibrate(a):
+    if not preflight(['teleop', 'wrist', 'dino']):
+        return 2
+    return in_container_tty(f'python3 {WS}/pick_pipeline.py '
+                            f'--calibrate-wrist --object sock '
+                            f'--prompt "sock. clothing item."')
+
+
+def mode_anchor(a):
+    if not preflight(['teleop', 'wrist', 'dino']):
+        return 2
+    return in_container_tty(f'python3 {WS}/pick_pipeline.py '
+                            f'--self-anchor --object {shlex.quote(a.object)} '
+                            f'--prompt {shlex.quote(a.prompt)}')
+
+
+def mode_viz(_a):
+    """Restore the operator console's data path. Moves nothing.
+
+    rosbridge (ws://localhost:9090) is the ONLY channel the SUDS/console page
+    has; when it dies the page still loads from :8080 and just reports
+    "no signal". The launch file now respawns it, but that only takes effect
+    on the next container start -- this repairs a live stack in place.
+    """
+    # bracket trick: a plain pattern also matches this very `bash -c` line
+    r = in_container("pgrep -f '[r]osbridge_websocket' | head -1",
+                     timeout=15, capture=True)
+    if (r.stdout or '').strip():
+        print('  [viz] rosbridge already running')
+    else:
+        print('  [viz] rosbridge DOWN -- starting it')
+        subprocess.run(['docker', 'exec', '-d', CONTAINER, 'bash', '-c',
+                        f'{SETUP} && exec ros2 run rosbridge_server '
+                        'rosbridge_websocket --ros-args -p port:=9090 '
+                        '-p address:=0.0.0.0 > /tmp/rosbridge.log 2>&1'])
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            time.sleep(2.0)
+            if port_open(9090):
+                break
+    for name, port in (('console http', 8080), ('rosbridge ws', 9090)):
+        print(f'  [viz] {name} :{port}: '
+              f'{"up" if port_open(port) else "DOWN"}')
+    # the relay is what keeps the flywheel panel populated between runs
+    r = in_container("pgrep -f '[f]lywheel_relay' | head -1", timeout=15,
+                     capture=True)
+    print(f'  [viz] flywheel relay: '
+          f'{"up" if (r.stdout or "").strip() else "DOWN"}')
+    return 0 if port_open(9090) else 2
+
+
+def mode_classic(a):
+    """Classic autonomous pipeline: fine-tuned YOLO 2D → RealSense depth →
+    GetSock3D 3D point → arm_bridge hand-eye pick loop.
+
+    Profile swap is done with a compose OVERRIDE file
+    (docker/docker-compose.classic.yml); docker-compose.yml itself is never
+    edited. Teleop is OFF in this profile (serial-port conflict), so the
+    teleop estop path does not exist -- `robot estop` detects the profile
+    and gates the loop via /arm_bridge/set_active instead.
+
+    Bring-up ends with the loop GATED OFF; nothing moves until --go.
+    """
+    def compose(files, why):
+        print(f'  [classic] {why}')
+        return subprocess.run(files + ['up', '-d'], cwd=COMPOSE_DIR).returncode
+
+    def wait_for_arm_bridge(deadline_s=600):
+        # entrypoint colcon-builds on every container start; poll until the
+        # arm_bridge services exist, then IMMEDIATELY gate the loop off --
+        # arm_bridge boots with active=True (standalone default).
+        print(f'  [classic] waiting for stack (colcon build; up to {deadline_s}s)')
+        deadline = time.time() + deadline_s
+        while time.time() < deadline:
+            r = in_container('timeout 8 ros2 service list 2>/dev/null '
+                             '| grep -c /arm_bridge/set_active || true',
+                             timeout=15, capture=True)
+            if (r.stdout or '').strip().endswith('1'):
+                return True
+            time.sleep(5)
+        return False
+
+    if a.go:
+        if current_profile() != 'classic':
+            print('stack is not in the classic profile -- run `robot classic` first')
+            return 2
+        ok, _ = set_arm_loop(True)
+        if not ok:
+            print('  [classic] set_active TRUE failed -- loop NOT armed')
+            return 2
+        print('  [classic] pick loop ARMED -- motion starts on a stable detection.')
+        print('  [classic] soft stop: robot classic --halt | robot estop')
+        print('  [classic] exit profile: robot classic --off | hard stop: power')
+        return 0
+
+    if a.halt:
+        ok, _ = set_arm_loop(False)
+        print(f'  [classic] loop gated {"OFF" if ok else "-- GATE CALL FAILED"}; '
+              'an in-flight pick sequence still finishes (no mid-motion abort).')
+        return 0 if ok else 2
+
+    if a.off:
+        code = compose(COMPOSE_TELEOP, 'recreating container in TELEOP profile')
+        if code != 0:
+            return code
+        print('  [classic] waiting for teleop link')
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            ok, _why = probe_teleop()
+            if ok:
+                print('  [classic] teleop profile restored (estop/stow available)')
+                return 0
+            time.sleep(5)
+        print('  [classic] teleop did not come back within 600s -- check '
+              f'`docker logs {CONTAINER}`')
+        return 2
+
+    # default: bring up the classic profile, loop gated off
+    if not a.yes:
+        print('bring-up recreates the running container (teleop goes away) and')
+        print('starts the autonomous stack. CLEAR THE FLOOR IN CAMERA VIEW first:')
+        print('there is a short window before the loop is gated off in which a')
+        print('stable detection could trigger a pick. Re-run with --yes to proceed.')
+        return 2
+    code = compose(COMPOSE_CLASSIC, 'recreating container in CLASSIC profile '
+                                    '(YOLO+ARM on, teleop off)')
+    if code != 0:
+        return code
+    if not wait_for_arm_bridge():
+        print('  [classic] arm_bridge never appeared -- check '
+              f'`docker logs {CONTAINER}`')
+        return 2
+    ok, _ = set_arm_loop(False)
+    print(f'  [classic] pick loop gated {"OFF" if ok else "-- GATE CALL FAILED"}')
+    if not ok:
+        print('  [classic] refusing to continue with an ungated loop; '
+              'fix and re-run, or `robot classic --off`')
+        return 2
+    # read-only preflight of the perception chain
+    r = in_container('timeout 8 ros2 topic list 2>/dev/null', timeout=15,
+                     capture=True)
+    topics = r.stdout or ''
+    for label, needle in (('yolo detections', '/yolo/detections'),
+                          ('clothes relay', '/clothes/detected'),
+                          ('aligned depth', 'aligned_depth')):
+        print(f'  [preflight] {label}: '
+              f'{"ok" if needle in topics else "MISSING"}')
+    r = in_container('timeout 8 ros2 service list 2>/dev/null '
+                     '| grep /clothes_perception/get_3d_pose || true',
+                     timeout=15, capture=True)
+    print(f'  [preflight] get_3d_pose service: '
+          f'{"ok" if (r.stdout or "").strip() else "MISSING"}')
+    print('  [classic] profile up, loop OFF. Stage the scene, then: '
+          'robot classic --go')
+    return 0
+
+
+def mode_halt(_a):
+    """Safe stop after batch runs / interrupts (HANDOFF §5.3): a killed batch
+    script leaves the arm holding its last commanded pose; at grasp depth the
+    servos hunt against the floor. Order matters:
+
+      1. SIGTERM scripted pipelines (their own halt-trap lifts first)
+      2. disarm the pi bridge  (mode: stop -- verified from its log line,
+         never assumed from the sender's side)
+      3. lift to the tucked pose (grip CLOSED -- in-run tuck convention),
+         UNLESS estop is latched: an operator estop is never countermanded.
+
+    Deliberately NO preflight: halt does its best in whatever state it finds.
+    """
+    # 1 -- scripted pipelines (bracket trick: don't match our own bash -c)
+    pats = ('[p]ick_pipeline.py', '[s]ock_cycle.py', '[c]ollect_pick_demos.py',
+            '[b]in_cycle.py', '[b]all_pick.py')
+    for pat in pats:
+        r = in_container(f"pkill -TERM -f '{pat}' && echo SIGNALED || true",
+                         timeout=15, capture=True)
+        if 'SIGNALED' in (r.stdout or ''):
+            print(f'  [halt] SIGTERM -> {pat}')
+    time.sleep(3.0)     # give the in-script halt-traps time to lift + exit
+
+    if current_profile() == 'classic':
+        # no teleop in this profile: gating arm_bridge IS the stop
+        ok, _ = set_arm_loop(False)
+        print(f'  [halt] classic profile: pick loop gated '
+              f'{"OFF" if ok else "-- GATE CALL FAILED (cut power!)"}')
+        return 0 if ok else 2
+
+    # 2 -- pi bridge to idle, verified from its log (doctrine: 2026-07-24,
+    # an unverified stop left execute mode silently armed)
+    in_container('ros2 topic pub --once /pi/request std_msgs/String '
+                 '\'{data: "{\\"mode\\": \\"stop\\"}"}\'',
+                 timeout=20, capture=True)
+    # the bridge is usually nohup'd with its log at /tmp/pi_bridge.log inside
+    # the container (NOT docker stdout); check there first, docker logs as
+    # fallback for a launch-stack bridge
+    r = in_container('tail -3 /tmp/pi_bridge.log 2>/dev/null', timeout=15,
+                     capture=True)
+    logs = r.stdout or ''
+    if 'request: stop -> mode=idle' not in logs:
+        r2 = subprocess.run(['docker', 'logs', '--since', '30s', CONTAINER],
+                            capture_output=True, text=True)
+        logs += (r2.stdout or '') + (r2.stderr or '')
+    stopped = 'request: stop -> mode=idle' in logs
+    print(f'  [halt] pi bridge: '
+          f'{"idle (log-verified)" if stopped else "STOP NOT CONFIRMED in log"}')
+
+    # 3 -- lift, unless an operator estop is latched
+    r = in_container('timeout 8 ros2 topic echo /teleop/state --once',
+                     timeout=15, capture=True)
+    if '"estop": true' in (r.stdout or ''):
+        print('  [halt] estop LATCHED -- not lifting (never countermands an '
+              'operator estop). Clear it from the console, then robot stow.')
+        return 0 if stopped else 2
+    lift = in_container_tty(
+        'ros2 topic pub --once /teleop/action std_msgs/String '
+        '\'{data: "goto:255,0,60,3.140"}\'')
+    print(f'  [halt] lift to tucked pose: {"sent" if lift == 0 else "FAILED"}')
+    return 0 if (stopped and lift == 0) else 2
+
+
+def mode_stow(_a):
+    if not preflight(['teleop']):
+        return 2
+    return in_container_tty(
+        'ros2 topic pub --once /teleop/action std_msgs/String '
+        '\'{data: "goto:255,0,60,1.08"}\'')
+
+
+def mode_estop(_a):
+    # deliberately NO preflight: estop must always fire.
+    if current_profile() == 'classic':
+        # teleop is not running in this profile -- /teleop/action goes
+        # nowhere. The strongest software stop is gating the pick loop.
+        # An in-flight pick sequence has no mid-motion abort and finishes
+        # (~seconds); hard stop is physical power.
+        ok, _ = set_arm_loop(False)
+        print(f'  [estop] classic profile: pick loop gated '
+              f'{"OFF" if ok else "-- GATE CALL FAILED (cut power!)"}')
+        return 0 if ok else 2
+    # /teleop/action, NOT /teleop/cmd: _cmd_cb expects a JSON operator frame
+    # and silently drops the bare string, so the old /teleop/cmd version was a
+    # no-op (found 2026-08-15). _action_cb matches 'estop' exactly and calls
+    # _all_stop(), which also gates goto: streams from scripted runs.
+    return in_container_tty(
+        'ros2 topic pub --once /teleop/action std_msgs/String '
+        '\'{data: "estop"}\'')
+
+
+def main():
+    ap = argparse.ArgumentParser(prog='robot')
+    sub = ap.add_subparsers(dest='mode', required=True)
+    sub.add_parser('status')
+    p = sub.add_parser('pick')
+    p.add_argument('--object', required=True)
+    p.add_argument('--prompt', required=True)
+    p.add_argument('--episodes', type=int, default=1)
+    p.add_argument('--record', action='store_true')
+    p.add_argument('--strategy', default='sweep')
+    p.add_argument('--gz', type=float)
+    p.add_argument('--drop-at')
+    p = sub.add_parser('pi')
+    p.add_argument('--prompt', required=True)
+    p.add_argument('--execute', action='store_true',
+                   help='actually move the arm (default: inference only)')
+    p.add_argument('--watch-s', type=float, default=30.0,
+                   help='seconds to stream /pi/result before returning')
+    sub.add_parser('calibrate')
+    sub.add_parser('viz')
+    p = sub.add_parser('anchor')
+    p.add_argument('--object', required=True)
+    p.add_argument('--prompt', required=True)
+    p = sub.add_parser('classic')
+    g = p.add_mutually_exclusive_group()
+    g.add_argument('--go', action='store_true',
+                   help='arm the pick loop (profile must already be classic)')
+    g.add_argument('--halt', action='store_true',
+                   help='gate the loop off; no restart (soft stop)')
+    g.add_argument('--off', action='store_true',
+                   help='recreate the container back into the teleop profile')
+    p.add_argument('--yes', action='store_true',
+                   help='confirm bring-up (floor cleared in camera view)')
+    sub.add_parser('halt')
+    sub.add_parser('stow')
+    sub.add_parser('estop')
+    a = ap.parse_args()
+
+    lk = open(LOCK_FILE, 'w')
+    if a.mode != 'estop':      # estop ignores the mutex on purpose
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('another robot mode is already running -- refusing '
+                  '(robot estop still works)')
+            return 3
+    code = {'status': mode_status, 'pick': mode_pick, 'pi': mode_pi,
+            'calibrate': mode_calibrate, 'anchor': mode_anchor,
+            'viz': mode_viz, 'classic': mode_classic, 'halt': mode_halt,
+            'stow': mode_stow, 'estop': mode_estop}[a.mode](a)
+    audit(a.mode, sys.argv[1:], code)
+    return code
+
+
+if __name__ == '__main__':
+    sys.exit(main())

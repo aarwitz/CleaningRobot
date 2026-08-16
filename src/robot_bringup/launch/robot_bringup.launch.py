@@ -643,7 +643,10 @@ def generate_launch_description():
         condition=IfCondition(enable_slam)
     )
     
-    # 9. Rosbridge server for web-based visualization
+    # 9. Rosbridge server for web-based visualization.
+    # respawn: it is the console's ONLY data path -- when it died (seen
+    # 2026-08-15) the page still served over :8080 but showed "no signal"
+    # forever, with nothing in the log to say why.
     rosbridge_server = Node(
         package='rosbridge_server',
         executable='rosbridge_websocket',
@@ -653,6 +656,8 @@ def generate_launch_description():
             'address': '0.0.0.0',
         }],
         output='screen',
+        respawn=True,
+        respawn_delay=3.0,
         condition=IfCondition(enable_visualization)
     )
     
@@ -671,6 +676,15 @@ def generate_launch_description():
     # (it was lost twice as a manually-started process before this entry).
     wrist_cam = ExecuteProcess(
         cmd=['python3', '/scripts/wrist_cam.py'],
+        output='screen',
+        respawn=True, respawn_delay=3.0,
+    )
+
+    # 12. Flywheel overlay relay: keeps the last pick-inference overlays
+    # republished at 1 Hz after the (transient) pick scripts exit, so the
+    # flywheel.html panels are never empty between runs.
+    flywheel_relay = ExecuteProcess(
+        cmd=['python3', '/scripts/flywheel_relay.py'],
         output='screen',
         respawn=True, respawn_delay=3.0,
     )
@@ -794,4 +808,5 @@ def generate_launch_description():
         rosbridge_server,
         http_server,
         wrist_cam,
+        flywheel_relay,
     ])

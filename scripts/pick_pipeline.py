@@ -31,6 +31,8 @@ two-view VLA training sample.
 import argparse
 import json
 import math
+import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -177,15 +179,21 @@ class PickPipeline(BallPick):
             box=box, pick_px=(u, int((y0 + y1) / 2)))
         return bx, by, 'ok', u
 
-    def is_claw_det(self, box):
+    def is_claw_det(self, box, whitelist=None):
         """The claw's own fingers get detected as objects (seen: 'white
         fluffy rabbit toy' 0.39 on the black finger). The fingers live in a
         fixed region of the wrist image AND are near-black; both together =
-        reject."""
+        reject. A DARK floor object near the claw matches both tests too
+        (2026-08-11: black sock at (157,384) rejected every scan while the
+        operator could pick it by hand) -- `whitelist` carries pixel centers
+        that a parallax probe proved are NOT the claw."""
         if self.wrist is None:
             return False
         u = (box[0] + box[2]) / 2
         v = (box[1] + box[3]) / 2
+        if whitelist and min(math.hypot(u - wu, v - wv)
+                             for wu, wv in whitelist) < 40.0:
+            return False
         in_claw_zone = 40 < u < 470 and v > 300
         if not in_claw_zone:
             return False
@@ -199,24 +207,117 @@ class PickPipeline(BallPick):
                   f'({u:.0f},{v:.0f})')
         return dark
 
+    def distractor_filter(self, dets, img_path, min_area=6000.0):
+        """Confidence alone cannot separate junk from socks (measured
+        2026-08-11: creamer cup 0.42 > white sock 0.38 > black sock 0.33).
+        Two signals that DO separate: real in-reach objects subtend >>6k px^2
+        at hover (creamer det was 3k), and a counter-prompt claims metallic
+        junk more strongly than 'sock' does."""
+        kept = []
+        for d_ in dets:
+            b = d_['box']
+            if (b[2] - b[0]) * (b[3] - b[1]) < min_area:
+                print(f'  [wrist] rejecting tiny det '
+                      f'({(b[2]-b[0])*(b[3]-b[1]):.0f} px^2)')
+                continue
+            kept.append(d_)
+        if not kept:
+            return kept
+        try:
+            neg = dino_client.detect(img_path, 'metal cup. mug. jar. bottle. '
+                                     'plastic bag.', confidence=0.25)
+        except Exception:
+            return kept          # counter-check unavailable: do not block
+        def iou(a, b):
+            ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+            iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+            inter = ix * iy
+            ua = ((a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter)
+            return inter / ua if ua > 0 else 0.0
+        out = []
+        for d_ in kept:
+            cf = d_.get('confidence') or d_.get('score') or 0.0
+            hit = next((n_ for n_ in neg if iou(d_['box'], n_['box']) > 0.5 and
+                        (n_.get('confidence') or n_.get('score') or 0) > cf),
+                       None)
+            if hit:
+                print(f"  [wrist] rejecting det: counter-prompt "
+                      f"'{hit.get('label')}' "
+                      f"{(hit.get('confidence') or hit.get('score')):.2f} "
+                      f"beats sock {cf:.2f}")
+                continue
+            out.append(d_)
+        return out
+
     # ── refine: wrist cam from the pre-grasp hover ──────────────────────────
-    def refine(self, bx, by, prompt, gz):
+    def refine(self, bx, by, prompt, gz, cap=65.0, lock_xy=None,
+               claw_whitelist=None):
         """Hover above the coarse target, detect in the WRIST frame, correct
         (bx, by) by the offset from the grasp anchor. Returns possibly
         corrected (bx, by); no-ops gracefully without wrist frames/anchor."""
+        pre = self.wrist.copy() if self.wrist is not None else None
         self.move(bx, by, gz + 130.0, t=WIDE, speed=90.0, grip_ramp=True)
         self.spin(0.9)
         if self.wrist is None:
             print('  [refine] no wrist frames -- skipping')
             return bx, by, None
+        if pre is not None and \
+                float(np.mean(cv2.absdiff(pre, self.wrist))) < 0.5:
+            # frames arriving at full rate but content identical across an
+            # arm move = stale stream (seen 2026-08-02: refine chased
+            # corrections computed on outdated viewpoints). Never correct on
+            # a frame that predates the motion.
+            print('  [refine] wrist stream STALE across the hover move -- '
+                  'refusing to correct')
+            return bx, by, None
         self.ensure_light()
         cv2.imwrite('/tmp/_wrist.png', self.wrist)
         try:
             dets = dino_client.detect('/tmp/_wrist.png', prompt,
-                                      confidence=0.35)
-            dets = [d_ for d_ in dets if not self.is_claw_det(d_['box'])]
-        except Exception:
-            dets = []
+                                      confidence=0.30)
+            dets = self.distractor_filter(dets, '/tmp/_wrist.png')
+            rejected = [d_ for d_ in dets
+                        if self.is_claw_det(d_['box'], claw_whitelist)]
+            dets = [d_ for d_ in dets if d_ not in rejected]
+        except Exception as e:
+            # tunnel-down must not read as "object not there"
+            print(f'  [refine] DINO unreachable: {e}')
+            dets, rejected = [], []
+        if not dets and rejected and claw_whitelist is None:
+            # Everything we saw was dark-in-the-claw-zone. The fingers ride
+            # WITH the camera (fixed pixels across arm moves); a floor object
+            # shifts. Jog the hover and see which one this is.
+            old_px = [((d_['box'][0] + d_['box'][2]) / 2,
+                       (d_['box'][1] + d_['box'][3]) / 2) for d_ in rejected]
+            print('  [refine] only claw-zone dark detections -- parallax '
+                  'probe (+40mm y jog)')
+            self.move(bx, by + 40.0, gz + 130.0, t=WIDE, speed=90.0)
+            self.spin(0.9)
+            mobile = []
+            if self.wrist is not None:
+                cv2.imwrite('/tmp/_wrist.png', self.wrist)
+                try:
+                    nd = dino_client.detect('/tmp/_wrist.png', prompt,
+                                            confidence=0.30)
+                except Exception as e:
+                    print(f'  [refine] DINO unreachable in probe: {e}')
+                    nd = []
+                new_px = [((d_['box'][0] + d_['box'][2]) / 2,
+                           (d_['box'][1] + d_['box'][3]) / 2) for d_ in nd]
+                # a finger re-detects at (nearly) the same pixel after the
+                # jog; a floor object's old pixel is left vacant
+                for ou, ov in old_px:
+                    if min((math.hypot(nu - ou, nv - ov)
+                            for nu, nv in new_px), default=1e9) > 25.0:
+                        mobile.append((ou, ov))
+            if mobile:
+                print(f'  [refine] parallax: {len(mobile)} det(s) SHIFTED -> '
+                      'real floor object, not the claw')
+                return self.refine(bx, by, prompt, gz, cap=cap,
+                                   lock_xy=lock_xy or (bx, by),
+                                   claw_whitelist=mobile)
+            print('  [refine] parallax: detections static -> genuinely the '
+                  'claw')
         if not dets:
             print('  [refine] no wrist detection -- keeping coarse target')
             self.publish_flywheel(self.wrist,
@@ -224,9 +325,44 @@ class PickPipeline(BallPick):
                                    'label': prompt.split('.')[0]},
                                   cam='wrist')
             return bx, by, None
+        anc = load_anchor()
+
+        # the wrist cam rides the base servo: its px axes are the CALIBRATION
+        # pose's axes rotated by the current base yaw. The Jacobian was
+        # measured at (300,0) (yaw~0); apply R(yaw) or off-axis corrections
+        # steer sideways (observed: circular multi-pass chase at y~+90,
+        # yaw~20 deg, while every near-axis pick converged fine)
+        th = math.atan2(by, bx)
+        cth, sth = math.cos(th), math.sin(th)
+
+        def corr_of(box_):
+            """px offset from anchor -> (dx,dy) arm-mm correction."""
+            u_, v_ = (box_[0] + box_[2]) / 2, (box_[1] + box_[3]) / 2
+            du_, dv_ = u_ - anc['u'], v_ - anc['v']
+            if 'Jinv' in anc:
+                Ji = anc['Jinv']
+                lx, ly = (Ji[0][0] * du_ + Ji[0][1] * dv_,
+                          Ji[1][0] * du_ + Ji[1][1] * dv_)
+            else:
+                lx, ly = dv_ * anc['mm_per_px'], -du_ * anc['mm_per_px']
+            return (cth * lx - sth * ly, sth * lx + cth * ly)
+
+        if anc is not None and len(dets) > 1:
+            # cluttered scene: several valid objects in view. Pixel-space
+            # stickiness fails because the view moves between passes --
+            # lock the target in ARM coordinates: keep the detection whose
+            # implied arm position is nearest the locked target (observed
+            # without this: 4-pass oscillation chasing different socks)
+            if lock_xy is not None:
+                dets.sort(key=lambda d_: math.hypot(
+                    bx + corr_of(d_['box'])[0] - lock_xy[0],
+                    by + corr_of(d_['box'])[1] - lock_xy[1]))
+            else:
+                dets.sort(key=lambda d_: math.hypot(
+                    (d_['box'][0] + d_['box'][2]) / 2 - anc['u'],
+                    (d_['box'][1] + d_['box'][3]) / 2 - anc['v']))
         wbox = dets[0]['box']
         wu, wv = (wbox[0] + wbox[2]) / 2, (wbox[1] + wbox[3]) / 2
-        anc = load_anchor()
         if anc is None:
             print(f'  [refine] wrist sees it at px ({wu:.0f},{wv:.0f}); no '
                   'anchor yet (self-calibrates from successful picks)')
@@ -241,23 +377,22 @@ class PickPipeline(BallPick):
         # 2x2 Jacobian when calibrated (--calibrate-wrist); the hand-assumed
         # axis mapping had the x sign backwards and corrected a far object
         # NEARER (attempt-5 short pick, operator-diagnosed).
-        du, dv = wu - anc['u'], wv - anc['v']
-        if 'Jinv' in anc:
-            J = anc['Jinv']
-            dx_mm = J[0][0] * du + J[0][1] * dv
-            dy_mm = J[1][0] * du + J[1][1] * dv
-        else:
-            dx_mm = dv * anc['mm_per_px']
-            dy_mm = -du * anc['mm_per_px']
+        dx_mm, dy_mm = corr_of(wbox)
         n = math.hypot(dx_mm, dy_mm)
-        if n > 65.0:
+        if n > cap:
             # log the raw magnitude: a consistently-capped correction is a
             # SYSTEMATIC staging bias (open-loop yaw), not detection noise
-            print(f'  [refine] raw correction {n:.0f}mm capped at 65')
-            dx_mm, dy_mm = dx_mm * 65.0 / n, dy_mm * 65.0 / n
+            print(f'  [refine] raw correction {n:.0f}mm capped at {cap:.0f}')
+            dx_mm, dy_mm = dx_mm * cap / n, dy_mm * cap / n
         print(f'  [refine] wrist px ({wu:.0f},{wv:.0f}) vs anchor '
               f'({anc["u"]:.0f},{anc["v"]:.0f}) -> correct '
               f'({dx_mm:+.0f},{dy_mm:+.0f})mm')
+        # remember the OTHER detections' implied arm positions so the grasp
+        # can tell when a neighbor sits inside the sweep corridor
+        self.neighbors = []
+        for d_ in dets[1:]:
+            ndx, ndy = corr_of(d_['box'])
+            self.neighbors.append((bx + ndx, by + ndy))
         self.publish_flywheel(self.wrist,
                               {'stage': 'refine (wrist cam)',
                                'label': prompt.split('.')[0],
@@ -272,15 +407,25 @@ class PickPipeline(BallPick):
     def grasp(self, bx, by, strategy, rec=None):
         p = STRATEGIES[strategy]
         gz = p['gz']
-        self.move(bx, by + p['approach_dy'], gz + 110.0, t=WIDE, speed=90.0,
+        # neighbor-aware sweep: the full +y approach scoops a second object
+        # that sits in the corridor (audit 2026-08-02: three double-grasp
+        # episodes) -- shorten the runway so the jaws close on ONE object
+        adx = p['approach_dy']
+        for nx, ny in getattr(self, 'neighbors', []):
+            if abs(nx - bx) < 55.0 and 15.0 < ny - by < adx + 40.0:
+                adx = 30.0
+                print(f'  [grasp] neighbor at ({nx:.0f},{ny:.0f}) in sweep '
+                      f'corridor -> short sweep (approach_dy {adx:.0f})')
+                break
+        self.move(bx, by + adx, gz + 110.0, t=WIDE, speed=90.0,
                   grip_ramp=True, rec=rec, phase='approach')
         self.spin(0.8)
         if self.pose()[3] > 1.25:
             print('  gripper failed to open')
             return False
-        self.move(bx, by + p['approach_dy'], gz, speed=45.0, settle=False,
+        self.move(bx, by + adx, gz, speed=45.0, settle=False,
                   rec=rec, phase='descend')
-        self.sweep_in(bx, by, gz, p['approach_dy'], p['overshoot'],
+        self.sweep_in(bx, by, gz, adx, p['overshoot'],
                       p['close_to'], close_start=p['close_start'],
                       z_blend=0.0, rec=rec, phase='grasp')
         self.grip(p['secure'], secs=0.8, rec=rec, phase='secure')
@@ -298,11 +443,17 @@ class PickPipeline(BallPick):
         return True
 
     # ── verify: both cameras, vision only ───────────────────────────────────
-    def verify(self, prompt, pick_xy=None):
+    def verify(self, prompt, pick_xy=None, rec=None):
         """pick_xy restricts the head floor-check to the pick's own bearing:
         other same-class objects in the scene (a second plush) must not
-        false-flag 'still on the floor'."""
+        false-flag 'still on the floor'. rec: save the exact frames the
+        verdict was computed from into the episode (audit trail)."""
         held_head = held_wrist = None
+        self._wrist_overwhelming = False
+        if rec is not None:
+            cv2.imwrite(str(rec.dir / 'verify_head.jpg'), self.img)
+            if self.wrist is not None:
+                cv2.imwrite(str(rec.dir / 'verify_wrist.jpg'), self.wrist)
         cv2.imwrite('/tmp/_vhead.png', self.img)
         try:
             v = dino_client.detect('/tmp/_vhead.png', prompt,
@@ -324,20 +475,31 @@ class PickPipeline(BallPick):
             try:
                 vw = dino_client.detect('/tmp/_vwrist.png', prompt,
                                         confidence=0.30)
-                vw = [d_ for d_ in vw if not self.is_claw_det(d_['box'])]
                 # From the HIGH verify pose the discrimination is easy: a
                 # held object is centimeters from the wrist lens (huge bbox);
                 # a miss shows distant floor (small/no detection). Area is
-                # the signal.
-                big = [d_ for d_ in vw
-                       if (d_['box'][2] - d_['box'][0]) *
-                          (d_['box'][3] - d_['box'][1]) > 18000]
-                held_wrist = bool(big)
+                # the signal. Do NOT apply the claw dark-filter here: a held
+                # DARK sock in the claw zone is exactly what it rejects
+                # (observed false-miss on the navy sock, 2026-08-02).
+                areas = [(d_['box'][2] - d_['box'][0]) *
+                         (d_['box'][3] - d_['box'][1]) for d_ in vw]
+                # thresholds re-derived from the 2026-08-02 audit: from the
+                # HIGH pose a sock on the FLOOR still subtends ~15-20k px^2
+                # (ep_0075 false held at >18k); a truly held sock is
+                # centimeters from the lens and fills >100k
+                held_wrist = any(ar > 60000 for ar in areas)
+                # an object FILLING the frame is unambiguous -- it overrides
+                # the head floor-check, which cannot tell 'my target is
+                # still down there' from 'a DIFFERENT object is down there'
+                # in multi-object scenes (ep_0069 false miss)
+                self._wrist_overwhelming = any(ar > 120000 for ar in areas)
             except Exception:
                 pass
-        # both cameras must agree when both have an opinion
+        # both cameras must agree when both have an opinion; an
+        # overwhelming wrist hold (frame-filling object) wins outright
         votes = [x for x in (held_head, held_wrist) if x is not None]
-        held = bool(votes) and all(votes)
+        held = (bool(votes) and all(votes)) or \
+            getattr(self, '_wrist_overwhelming', False)
         print(f'  [verify] head floor-clear={held_head} '
               f'wrist holds-object={held_wrist} -> held={held}')
         self.publish_flywheel(
@@ -491,10 +653,16 @@ def calibrate_wrist(c, a):
     the assumed-axes sign errors for good."""
     bx, by, why, _ = c.coarse(a.prompt)
     if why != 'ok':
-        print(f'calibration needs a localizable object ({why})')
-        return 2
+        # head cam is blind inside the arm's workspace; the jogs only need
+        # SOME object in the wrist view -- hover at nominal and use whatever
+        # the wrist sees
+        print(f'  [cal] head cam cannot localize ({why}) -- wrist-only '
+              'from nominal hover')
+        bx, by = 300.0, 0.0
     gz = STRATEGIES[a.strategy]['gz']
     hover = gz + 130.0
+
+    prev = [None]
 
     def see(tag):
         c.spin(0.8)
@@ -509,8 +677,16 @@ def calibrate_wrist(c, a):
         if not dets:
             print(f'  {tag}: no detection')
             return None
+        # clutter: must TRACK ONE OBJECT across jogs, or the columns mix
+        # different socks' positions and the solved J is garbage
+        if prev[0] is not None:
+            dets.sort(key=lambda d_: math.hypot(
+                (d_['box'][0]+d_['box'][2])/2 - prev[0][0],
+                (d_['box'][1]+d_['box'][3])/2 - prev[0][1]))
         b = dets[0]['box']
         p = ((b[0]+b[2])/2, (b[1]+b[3])/2)
+        if prev[0] is None:
+            prev[0] = p
         print(f'  {tag}: px ({p[0]:.0f},{p[1]:.0f})')
         return p
 
@@ -518,9 +694,10 @@ def calibrate_wrist(c, a):
     p0 = see('center')
     if p0 is None:
         return 2
-    D = 25.0
-    c.move(bx + D, by, hover, speed=40.0)
-    px_ = see('+x')
+    D = 40.0
+    # jog -x (retract): +x walks the claw OVER the object and occludes it
+    c.move(bx - D, by, hover, speed=40.0)
+    px_ = see('-x')
     c.move(bx, by, hover, speed=40.0)
     c.move(bx, by + D, hover, speed=40.0)
     py_ = see('+y')
@@ -528,11 +705,16 @@ def calibrate_wrist(c, a):
     if px_ is None or py_ is None:
         return 2
     # object pixel moves OPPOSITE to the EE, so J columns are negated deltas
-    ju = (-(px_[0]-p0[0])/D, -(py_[0]-p0[0])/D)
-    jv = (-(px_[1]-p0[1])/D, -(py_[1]-p0[1])/D)
+    # x jog is NEGATIVE D: object px delta already has the sign of -x, so
+    # dividing by +D gives the +x column directly
+    ju = ((px_[0]-p0[0])/D, -(py_[0]-p0[0])/D)
+    jv = ((px_[1]-p0[1])/D, -(py_[1]-p0[1])/D)
     det = ju[0]*jv[1] - ju[1]*jv[0]
-    if abs(det) < 1e-6:
-        print('degenerate Jacobian; aborting')
+    if abs(det) < 0.3:
+        # near-singular = one jog produced almost no pixel motion (tracked
+        # the wrong object, or the axis is unobservable from this pose);
+        # its inverse would emit wild corrections -- refuse to save
+        print(f'near-singular Jacobian (det {det:.3f}); NOT saving')
         return 2
     Jinv = [[jv[1]/det, -ju[1]/det], [-jv[0]/det, ju[0]/det]]
     anc = load_anchor() or {'u': p0[0], 'v': p0[1], 'n': 0, 'mm_per_px': 0.55}
@@ -562,6 +744,93 @@ def update_anchor(u, v):
     print(f'  [anchor] updated -> ({a["u"]:.0f},{a["v"]:.0f}) n={a["n"]}')
 
 
+def self_anchor(c, a):
+    """Autonomously re-learn the grasp anchor after a camera-mount change.
+
+    The anchor ('object at this wrist pixel == object in the jaws') can be
+    measured by the robot itself: attempt grasps around the current best
+    guess with small spiral offsets; on the FIRST hold, carry the object to
+    the standard hover, release it, and detect where it lands. The landing
+    pixel is the grasp point as seen by the (new) camera orientation --
+    a gold sample with no human in the loop."""
+    gz = STRATEGIES[a.strategy]['gz']
+    offsets = [(0, 0), (15, 0), (-15, 0), (0, 15), (0, -15),
+               (15, 15), (-15, -15), (20, -20)]
+    for i, (ox, oy) in enumerate(offsets):
+        print(f'\n── self-anchor attempt {i+1}/{len(offsets)} '
+              f'offset ({ox:+.0f},{oy:+.0f}) ──')
+        bx, by, wrist_px = c.refine(300.0, 0.0, a.prompt, gz, cap=140.0)
+        if wrist_px is None:
+            for sx, sy in ((260.0, 70.0), (320.0, -70.0),
+                           (250.0, -70.0), (340.0, 60.0)):
+                bx, by, wrist_px = c.refine(sx, sy, a.prompt, gz, cap=140.0)
+                if wrist_px is not None:
+                    break
+        if wrist_px is None:
+            print('  no object visible from any hover; stopping')
+            return 2
+        lock = (bx, by)
+        for _ in range(2):
+            p_prev = (bx, by)
+            bx, by, wp = c.refine(bx, by, a.prompt, gz, lock_xy=lock)
+            if wp is None:
+                bx, by = p_prev
+                break
+            lock = (bx, by)
+            if math.hypot(bx - p_prev[0], by - p_prev[1]) < 15.0:
+                break
+        try:
+            c.grasp(bx + ox, by + oy, a.strategy)
+        except RuntimeError as e:
+            print(f'  aborted: {e}')
+            continue
+        held = False
+        if c.wrist is not None:
+            cv2.imwrite('/tmp/_sa.png', c.wrist)
+            try:
+                vw = dino_client.detect('/tmp/_sa.png', a.prompt,
+                                        confidence=0.30)
+                vw = [d_ for d_ in vw if not c.is_claw_det(d_['box'])]
+                held = any((d_['box'][2] - d_['box'][0]) *
+                           (d_['box'][3] - d_['box'][1]) > 18000
+                           for d_ in vw)
+            except Exception:
+                pass
+        print(f'  held={held}')
+        if not held:
+            c.grip(WIDE, secs=0.8)
+            continue
+        # carry to the standard hover, release, and observe the landing
+        c.move(300.0, 0.0, gz + 130.0, speed=50.0)
+        c.spin(0.5)
+        c.grip(WIDE, secs=1.0)
+        c.spin(1.5)
+        cv2.imwrite('/tmp/_sa_land.png', c.wrist)
+        try:
+            dets = dino_client.detect('/tmp/_sa_land.png', a.prompt,
+                                      confidence=0.30)
+            dets = [d_ for d_ in dets if not c.is_claw_det(d_['box'])]
+        except Exception as e:
+            print(f'  landing detect failed: {e}')
+            return 2
+        if not dets:
+            print('  released object not visible from hover; cannot anchor')
+            return 2
+        # the dropped object is directly under the lens: take the LARGEST box
+        dets.sort(key=lambda d_: -(d_['box'][2] - d_['box'][0]) *
+                                  (d_['box'][3] - d_['box'][1]))
+        b = dets[0]['box']
+        u, v = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        anc = load_anchor() or {'mm_per_px': 0.55}
+        anc.update({'u': u, 'v': v, 'n': 3})
+        Path(ANCHOR_FILE).write_text(json.dumps(anc))
+        print(f'  ANCHOR LEARNED: ({u:.0f},{v:.0f}) from self-drop '
+              f'(offset that held: ({ox:+.0f},{oy:+.0f}))')
+        return 0
+    print('no hold anywhere in the offset spiral; anchor not learned')
+    return 2
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--object', required=True)
@@ -581,11 +850,47 @@ def main():
                     help='human-in-the-loop pick-pose demos: operator '
                          'positions the open claw, system closes/lifts/'
                          'verifies and learns anchor + grasp z')
+    ap.add_argument('--self-anchor', action='store_true',
+                    help='autonomously re-learn the grasp anchor: attempt '
+                         'grasps with small spiral offsets; on the first '
+                         'hold, release the object from the hover and take '
+                         'its landing pixel as the anchor (no human demos)')
+    ap.add_argument('--wrist-only', action='store_true',
+                    help='skip head-cam coarse + staging: hover at a nominal '
+                         'in-reach spot and localize purely with the wrist '
+                         'cam. For arm-only sessions (base powered off) where '
+                         'the object is in reach but below the head cam\'s '
+                         'depth-valid band.')
+    ap.add_argument('--gz', type=float, default=None,
+                    help='override grasp z (beats strategy default and bank)')
+    ap.add_argument('--drop-at', type=str, default=None,
+                    help='"x,y" arm coords to release at instead of the pick '
+                         'spot')
     ap.add_argument('--out', type=str, default='/demos/picks')
     a = ap.parse_args()
 
     rclpy.init()
     c = PickPipeline()
+
+    def _halt_trap(signum, _frm):
+        # A killed batch script must NEVER leave the arm parked at its last
+        # commanded pose: at grasp depth the servos hunt against the floor
+        # (observed 2026-08-15, HANDOFF §5.3). Lift to the tucked pose
+        # (closed grip -- the in-run tuck convention; nothing held gets
+        # flung), then hard-exit: normal cleanup can hang mid-spin.
+        # `robot halt` also SIGTERMs us and re-sends the same lift as
+        # belt-and-braces, so a double send is expected and harmless.
+        print(f'\n[halt-trap] signal {signum}: lifting to tucked safe pose',
+              flush=True)
+        try:
+            c.send(255, 0, 60, GRIP_CLOSED)
+            time.sleep(0.5)     # let the publish flush before exiting
+        finally:
+            os._exit(65)
+
+    signal.signal(signal.SIGTERM, _halt_trap)
+    signal.signal(signal.SIGINT, _halt_trap)
+
     if not c.wait_ready() or not c.wait_depth():
         print('ABORT: teleop/camera/depth not ready')
         return 1
@@ -594,6 +899,11 @@ def main():
         root.mkdir(parents=True, exist_ok=True)
     if a.calibrate_wrist:
         rc = calibrate_wrist(c, a)
+        c.destroy_node()
+        rclpy.shutdown()
+        return rc
+    if a.self_anchor:
+        rc = self_anchor(c, a)
         c.destroy_node()
         rclpy.shutdown()
         return rc
@@ -606,11 +916,21 @@ def main():
         if a.record else 0
     STRATEGIES[a.strategy]['gz'] = taught_gz(a.object,
                                              STRATEGIES[a.strategy]['gz'])
+    if a.gz is not None:
+        STRATEGIES[a.strategy]['gz'] = a.gz
+        print(f'  [gz] operator override {a.gz:.0f}')
 
     ok_n = miss_n = 0
     for ep in range(a.episodes):
         print(f'\n── {a.object} attempt {ep+1}/{a.episodes} ──')
-        bx, by, why, u0 = c.coarse(a.prompt)
+        if a.wrist_only:
+            # the head cam cannot depth-localize inside the arm's workspace
+            # (blind <300mm, box hits frame bottom); the wrist cam owns
+            # anything already in reach
+            bx, by, why, u0 = 300.0, 0.0, 'ok', None
+            print('  [wrist-only] nominal hover (300,0); wrist cam localizes')
+        else:
+            bx, by, why, u0 = c.coarse(a.prompt)
         if why == 'blind' and a.allow_drive:
             # object inside the depth blind zone: tucked-arm backup, coarse
             # again from depth-valid range (the drive-back happens in the
@@ -642,12 +962,74 @@ def main():
         rec = DualRecorder(root, idx, f'pick up the {a.object}') \
             if a.record else None
         bx0, by0 = bx, by
-        bx, by, wrist_px = c.refine(bx, by, a.prompt, STRATEGIES[a.strategy]['gz'])
+        bx, by, wrist_px = c.refine(bx, by, a.prompt, STRATEGIES[a.strategy]['gz'],
+                                    cap=140.0 if a.wrist_only else 65.0)
+        if a.wrist_only:
+            if wrist_px is None:
+                # scan other in-reach hover spots: dropped objects scatter
+                # beyond the single nominal hover's wrist FOV
+                for sx, sy in ((260.0, 70.0), (320.0, -70.0), (250.0, -70.0),
+                               (340.0, 60.0)):
+                    print(f'  [wrist-only] scanning hover ({sx:.0f},{sy:.0f})')
+                    bx, by, wrist_px = c.refine(sx, sy, a.prompt,
+                                                STRATEGIES[a.strategy]['gz'])
+                    if wrist_px is not None:
+                        break
+            if wrist_px is None:
+                print('  [wrist-only] wrist cannot see the object -- skipping '
+                      '(no blind grasp at the nominal spot)')
+                miss_n += 1
+                if rec:
+                    rec.finish(False, {'object': a.object, 'note': 'no wrist det'})
+                    idx += 1
+                continue
+            # converge on the LOCKED target: the initial full-cap pass fixed
+            # which physical object we are picking (arm coords); later passes
+            # only trim residual error on that same object
+            lock = (bx, by)
+            for _ in range(3):
+                px_prev = (bx, by)
+                bx, by, wrist_px = c.refine(bx, by, a.prompt,
+                                            STRATEGIES[a.strategy]['gz'],
+                                            lock_xy=lock)
+                if wrist_px is None:
+                    bx, by = px_prev       # keep last good estimate
+                    wrist_px = (0, 0)      # target was seen; do not abort
+                    break
+                lock = (bx, by)
+                if math.hypot(bx - px_prev[0], by - px_prev[1]) < 15.0:
+                    break
+            # floor-grasp reach gate: beyond r~340 the jaw tips rise off the
+            # floor (posture-signed drop) and send() silently CLAMPS the
+            # command -- the pick shorts every time. Skip; it needs a base
+            # move, not more arm.
+            rng_ = math.hypot(bx, by)
+            if rng_ > 340.0:
+                print(f'  [wrist-only] target r={rng_:.0f} is beyond floor-'
+                      'grasp reach (~340)')
+                near = [(nx, ny) for nx, ny in getattr(c, 'neighbors', [])
+                        if math.hypot(nx, ny) <= 340.0]
+                if near:
+                    bx, by = min(near, key=lambda p_: math.hypot(*p_))
+                    print(f'  [wrist-only] retargeting in-reach neighbor '
+                          f'({bx:.0f},{by:.0f})')
+                    bx, by, wrist_px = c.refine(bx, by, a.prompt,
+                                                STRATEGIES[a.strategy]['gz'],
+                                                lock_xy=(bx, by))
+                if wrist_px is None or math.hypot(bx, by) > 340.0:
+                    print('  [wrist-only] nothing in reach -- skipping; '
+                          'needs a base move')
+                    miss_n += 1
+                    if rec:
+                        rec.finish(False, {'object': a.object,
+                                           'note': f'out of reach r={rng_:.0f}'})
+                        idx += 1
+                    continue
         corr_mm = math.hypot(bx - bx0, by - by0) if wrist_px else None
         held = False
         try:
             if c.grasp(bx, by, a.strategy, rec=rec):
-                held = c.verify(a.prompt, pick_xy=(bx, by))
+                held = c.verify(a.prompt, pick_xy=(bx, by), rec=rec)
         except RuntimeError as e:
             print(f'  aborted: {e}')
         if rec:
@@ -665,9 +1047,14 @@ def main():
                 print('holding (--keep)')
                 break
             p = STRATEGIES[a.strategy]
-            c.move(bx + 15.0, by, p['gz'] + 10.0, speed=35.0)
+            if a.drop_at:
+                px_, py_ = (float(v) for v in a.drop_at.split(','))
+            else:
+                px_, py_ = bx + 15.0, by
+            c.move(px_, py_, p['gz'] + 110.0, speed=60.0)
+            c.move(px_, py_, p['gz'] + 10.0, speed=35.0)
             c.grip(WIDE, secs=1.0)
-            c.move(bx + 15.0, by, p['gz'] + 110.0, speed=80.0)
+            c.move(px_, py_, p['gz'] + 110.0, speed=80.0)
         else:
             miss_n += 1
             c.grip(WIDE, secs=0.8)

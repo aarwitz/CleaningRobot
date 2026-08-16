@@ -66,10 +66,54 @@ def is_held(fb):
     return abs(fb.get('torH', 0)) >= HELD_TORH_MIN or fb.get('t', 9) <= HELD_T_MAX
 
 # ── workspace (arm frame, mm) ───────────────────────────────────────────────
-R_SAFE_MAX = 265.0
+# Valid picks and drops happen in an ANNULUS, not just "within reach". The
+# RealSense rides the arm's rotating base at the front of the robot, so any
+# pose with a small radius swings whatever is in the gripper back into the
+# camera. Observed 2026-07-21: a move to r=150 pressed the held toy flat
+# against the right lens. R_WORK_MIN is the near wall of that annulus.
+# 200 was still close enough that picks crowded the lens, so the near wall was
+# pushed out to 235 (operator request 2026-07-21). Picks and drops now live in
+# the outer band only; bearing +/-24 deg still gives ~+/-100 mm of lateral room
+# at r=250, which is where the random place-transforms get their spread.
+R_WORK_MIN = 235.0           # inside this, a carried object crowds the camera
+R_SAFE_MAX = 265.0           # max radius for LOW targets (floor picks)
+R_ELEVATED_MAX = 300.0       # max radius for raised targets (z >= -150)
 HOME = (235.0, 0.0, 235.0)
 LIFT = 120.0                 # transit height above the floor
 APPROACH = 60.0              # hover height before descending
+
+
+def max_radius_at(z):
+    """Reach is z-dependent: the arm folds down to touch the floor, so its
+    horizontal envelope SHRINKS at low z and opens up higher. R_SAFE_MAX=265
+    was measured for floor picks (z about -210). Measured 2026-06: the arm
+    reached (300, 0) down to z=-161, so elevated targets legitimately extend
+    past 265 -- clamping them to 265 made reachable objects look unreachable.
+    """
+    if z is None or z <= -180.0:
+        return R_SAFE_MAX
+    if z >= -150.0:
+        return R_ELEVATED_MAX
+    span = (z - (-180.0)) / 30.0            # linear blend over -180..-150
+    return R_SAFE_MAX + span * (R_ELEVATED_MAX - R_SAFE_MAX)
+
+
+def clamp_to_workspace(x, y, z=None):
+    """Push (x, y) into the valid annulus, preserving bearing.
+
+    Clamps rather than raises so a stray waypoint degrades into a safe one
+    instead of aborting a run mid-episode; the warning makes it visible.
+    """
+    r = math.hypot(x, y)
+    if r < 1e-6:
+        return R_WORK_MIN, 0.0
+    r_new = min(max(r, R_WORK_MIN), max_radius_at(z))
+    if abs(r_new - r) > 0.5:
+        print(f'  [workspace] r={r:.0f} -> {r_new:.0f} '
+              f'({"too close to camera" if r < R_WORK_MIN else "beyond reach"})')
+        s = r_new / r
+        return x * s, y * s
+    return x, y
 
 
 def grid_points(radii=(205, 235, 262), bearings_deg=(-24, -12, 0, 12, 24)):
@@ -131,7 +175,21 @@ class Arm:
         return None
 
     def move(self, x, y, z, grip, spd=0.25):
+        # Every cartesian move goes through the annulus guard — including
+        # ad-hoc poses from one-off scripts, which is how the camera got
+        # fouled in the first place.
+        x, y = clamp_to_workspace(x, y, z)
         self.send({'T': 104, 'x': x, 'y': y, 'z': z, 't': grip, 'spd': spd})
+
+    def grip(self, x, y, z, grip, settle=3.0, spd=0.25):
+        """Actuate the jaw at a held pose and WAIT for it to finish.
+
+        The jaw is slow and a following cartesian move preempts it mid-travel,
+        so the claw never fully closes/opens before the arm leaves. Keep the
+        pose identical to the previous waypoint so only the jaw moves.
+        """
+        self.move(x, y, z, grip, spd)
+        time.sleep(settle)
 
     def go(self, x, y, z, grip, dwell, spd=0.25):
         self.move(x, y, z, grip, spd)
@@ -146,7 +204,7 @@ class Arm:
 
 
 def probe_surface(arm, x, y, start_z=170.0, coarse=16.0, fine=4.0, err_limit=8.0,
-                  tor_limit=150.0, min_z=-280.0):
+                  tor_limit=170.0, min_z=-280.0):
     """Descend at (x, y) until the wrist stops tracking the commanded z or the
     elbow torque spikes. Returns the contact z, or None if never reached.
 

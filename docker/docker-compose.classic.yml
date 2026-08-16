@@ -1,0 +1,24 @@
+# CLASSIC AUTONOMOUS PICK profile — overlay on docker-compose.yml.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.classic.yml up -d
+#
+# Fine-tuned YOLO (socks2) 2D detect → aligned RealSense depth → GetSock3D
+# 3D point → arm_bridge hand-eye pick loop. This is the original demonstrated
+# pipeline (see CLAUDE.md architecture #4/#5/#8).
+#
+# NEVER run this file by hand — `scripts/robot classic` is the sanctioned
+# entrypoint. It gates the arm_bridge loop off immediately after bring-up
+# (/arm_bridge/set_active false) so nothing moves until `robot classic --go`.
+#
+# TELEOP IS OFF in this profile: arm_bridge owns /dev/ttyUSB0, so the teleop
+# link — and with it `robot stow`, the browser E-STOP, and the teleop estop
+# path — does not exist. `robot estop` detects this profile and gates the
+# loop via set_active instead. Hard stop remains physical power.
+services:
+  vision:
+    environment:
+      ENABLE_TELEOP: "false"  # arm_bridge takes the serial port
+      ENABLE_YOLO: "true"     # socks2.plan on the head cam → /yolo/detections
+      ENABLE_ARM: "true"      # arm_bridge autonomous IDLE→…→COOLDOWN loop
+      # BEHAVIOR / NAV2 stay false (base unpowered, arm-only demo);
+      # everything else inherits from docker-compose.yml.

@@ -89,3 +89,28 @@ These talk to rosbridge at `ws://localhost:9090`.
 ## Hardware
 
 RealSense D455 (USB 3.0); motor driver on I2C bus 7 addr `0x34`; Waveshare RoArm v2 on `/dev/ttyUSB0` @ 115200. The compose file runs `privileged`, `network_mode: host`, NVIDIA runtime, and maps `/dev/bus/usb`, `/dev/i2c-7`, and `/dev`.
+
+## Operating the robot (HARD RULE)
+
+**All robot motion goes through `scripts/robot` — never ad-hoc.** Do not
+docker-exec bespoke python that commands the arm, do not publish to
+`/teleop/action`, `/teleop/cmd`, or `/cmd_vel` by hand, and do not invoke
+`pick_pipeline.py` / `pi_bridge.py` directly. The sanctioned modes are:
+
+```
+scripts/robot status       # health snapshot (moves nothing)
+scripts/robot pick ...     # scripted DINO pick (wrist-only)
+scripts/robot pi ...       # π0 policy episode (--execute to move)
+scripts/robot calibrate    # wrist Jacobian re-measure
+scripts/robot anchor ...   # self-anchor grasp-drop-observe
+scripts/robot classic ...  # classic YOLO 2D→3D depth pick profile (--go arms it)
+scripts/robot halt         # safe stop: kill pipelines, disarm π, lift to tuck
+scripts/robot stow         # tucked safe pose
+scripts/robot estop        # software E-STOP (always allowed)
+```
+
+It enforces a single-instance lock, per-mode preflight (teleop link, wrist
+cam, DINO/π tunnels), and appends every invocation to `~/robot_runs.log`.
+If a needed capability is missing, ADD A MODE to `scripts/robot` (small,
+vetted, preflighted) rather than bypassing it. Read-only observation
+(`ros2 topic echo`, grabbing camera frames) is fine outside the wrapper.

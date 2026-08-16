@@ -30,7 +30,9 @@ lose the operator (watchdog timeout, disconnect, shutdown, exception) MUST
 call stop_all(). That is the whole reason the node has a deadman.
 """
 
+import glob
 import json
+import os
 import threading
 import time
 
@@ -77,9 +79,18 @@ class ArmLink:
             return False
         with self._lock:
             try:
+                # a servo-rail brownout can drop the adapter off the bus and
+                # re-enumerate it at the next free index (seen: ttyUSB0 ->
+                # ttyUSB1, 2026-08-02); fall back to any present ttyUSB*
+                port = self.port_name
+                if not os.path.exists(port):
+                    cands = sorted(glob.glob('/dev/ttyUSB*'))
+                    if cands:
+                        port = cands[0]
+                        self._info(f'{self.port_name} missing -> using {port}')
                 # dsrdtr=None + RTS/DTR low: vendor convention that stops the
                 # ESP32 auto-resetting the moment we open the port.
-                self.ser = serial.Serial(self.port_name, self.baud,
+                self.ser = serial.Serial(port, self.baud,
                                          timeout=0.15, dsrdtr=None)
                 self.ser.setRTS(False)
                 self.ser.setDTR(False)
