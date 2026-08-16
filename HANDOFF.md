@@ -257,6 +257,30 @@ existing checkpoint.
 - Committed `6515805` (prior session's 15-file working tree) on
   `sock-demos-and-pi-finetune`; not yet pushed.
 
+## 7c. Afternoon session 2026-08-16 (fusion + verify integrity)
+
+- **Wrist+head socks2 on-device** (`yolo_trt_py`, contiguity + BGR fixes,
+  stamp-gated freshness). DINO remains: counter-prompt arbitration (both
+  detector paths -- the sock-filled plastic bag detects as sock THROUGH the
+  plastic), head coarse, and pseudo-labeling.
+- **head_scout fusion**: head 2D + floor-plane ray-cast -> arm targets inside
+  the depth-blind band; aims wrist-only hovers (offline-validated via
+  `scripts/scout_validate.py`, a no-motion harness that feeds the SUDS
+  overlays). KNOWN GAP: plane fit often rejected at the OBSERVE pose (arm in
+  the depth band despite side-column masking) -- needs an outlier-refit.
+- **Near-end retarget** for elongated socks (centroid maps ~10cm past the
+  graspable near end); FLOOR_REACH_R centralized, operator-reduced to 320.
+- **VERIFY REBUILT** after five detector-based false successes (all audited,
+  labels corrected in demos/picks): high pose first (5.5 doctrine), then
+  claw-region pixel-diff vs an empty-claw session-start reference (empty ~7,
+  held >14, overwhelming >40). Detector-free; the scene permanently contains
+  a dark sock-shaped claw, so every detector referee eventually lies.
+- **Depth-loft for auto-gz is impossible** in the pick zone (RealSense
+  min-range ~300mm, measured); scout-aimed picks default gz -203.
+- Autonomous holds today: anchor re-learn grasp, ep_0090, ep_0105
+  (operator-confirmed). Wrist-frame claw grouping = socks2 OOD -> the
+  pseudo-label/fine-tune with wrist frames is the durable detector fix.
+
 ## 8. Operating notes / gotchas
 
 - Config truth lives in `docker/docker-compose.yml` env vars, **not** the launch
