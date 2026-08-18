@@ -20,6 +20,8 @@ Modes:
   robot anchor --object X --prompt "Y"  self-anchor (grasp-drop-observe)
   robot viz                             repair the console data path (no motion)
   robot classic [--go|--halt|--off]     classic YOLO 2D->3D depth pick pipeline
+  robot eval [--trials N]               honest pi0 eval: scout-staged trials,
+                                        claw-diff verify, voids never count
   robot halt                            safe stop: kill pipelines, disarm pi,
                                         lift to tucked pose (grip closed)
   robot stow                            tucked safe pose, gripper open
@@ -392,6 +394,22 @@ def mode_classic(a):
     return 0
 
 
+def mode_eval(a):
+    # pi0 evaluation moves the arm (policy execute + verify pose): full
+    # preflight. head_yolo powers the staging scout.
+    if not preflight(['teleop', 'wrist', 'pi']):
+        return 2
+    r = in_container('timeout 10 ros2 topic hz /head_yolo/detections '
+                     '--window 3 2>&1 | head -1', timeout=16, capture=True)
+    if 'average rate' not in (r.stdout or ''):
+        print('  [preflight] head-yolo: DOWN (staging scout needs it)')
+        return 2
+    print('  [preflight] head-yolo: ok')
+    return in_container_tty(
+        f'python3 {WS}/pi_eval.py --trials {a.trials} '
+        f'--prompt {shlex.quote(a.prompt)} --watch-s {a.watch_s:.0f}')
+
+
 def mode_halt(_a):
     """Safe stop after batch runs / interrupts (HANDOFF §5.3): a killed batch
     script leaves the arm holding its last commanded pose; at grasp depth the
@@ -529,6 +547,10 @@ def main():
                    help='recreate the container back into the teleop profile')
     p.add_argument('--yes', action='store_true',
                    help='confirm bring-up (floor cleared in camera view)')
+    p = sub.add_parser('eval')
+    p.add_argument('--trials', type=int, default=3)
+    p.add_argument('--prompt', default='pick up the sock')
+    p.add_argument('--watch-s', type=float, default=40.0)
     sub.add_parser('halt')
     sub.add_parser('stow')
     sub.add_parser('estop')
@@ -544,7 +566,8 @@ def main():
             return 3
     code = {'status': mode_status, 'pick': mode_pick, 'pi': mode_pi,
             'calibrate': mode_calibrate, 'anchor': mode_anchor,
-            'viz': mode_viz, 'classic': mode_classic, 'halt': mode_halt,
+            'viz': mode_viz, 'classic': mode_classic, 'eval': mode_eval,
+            'halt': mode_halt,
             'stow': mode_stow, 'estop': mode_estop}[a.mode](a)
     audit(a.mode, sys.argv[1:], code)
     return code

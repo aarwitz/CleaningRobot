@@ -230,6 +230,29 @@ pseudo-labels into better on-device models.
 
 ---
 
+## 6b. In flight (2026-08-18)
+
+- **π0 v2 training RUNNING on RunPod**: pod `5t8jza01ekta74` (A40, $0.44/hr,
+  ssh via jetson key `~/.ssh/id_ed25519_runpod` -> root@69.30.85.129:22057).
+  `pi0_roarm_sock_cartesian_wrist_lora --exp-name sock_v2_wrist`, 5000 steps,
+  wandb disabled, log `/workspace/train.log`, data checksum-verified
+  (116 eps). Bootstrap's norm-stats integration test PASSED. When done:
+  checkpoint at `~/openpi/checkpoints/pi0_roarm_sock_cartesian_wrist_lora/
+  sock_v2_wrist/<step>` -- rsync to RSL, serve with the SAME config name and
+  `pi_bridge` `wrist_topic:=/wrist_cam/image_raw/compressed`.
+- **socks3 queued on the same pod** after pi0 finishes: `/workspace/
+  pseudo_v1.tar` is up; pip install ultralytics, `yolo detect train
+  data=pseudo_v1/dataset.yaml model=yolov8s.pt epochs=60 imgsz=640`,
+  export ONNX. Remember: RGB model -> `bgr_input:=false`.
+- **`robot eval` mode + `scripts/pi_eval.py`** (the honest evaluator, §5.5
+  doctrine): scout-staged trials (voids never count), log-verified policy
+  stop, claw-diff verify from the high pose. BLOCKED on arm power for the
+  v1 baseline -- run `robot eval --trials 5` once the PSU is on.
+- Container restarted: launch-managed yolo nodes verified live (4.4 Hz).
+- STOP THE POD when done: `curl -X POST -H "Authorization: Bearer $(cat
+  ~/.runpod_key)" https://rest.runpod.io/v1/pods/5t8jza01ekta74/stop`
+  (then DELETE to stop storage billing).
+
 ## 7. Operating notes / gotchas
 
 - Config truth lives in `docker/docker-compose.yml` env vars, **not** the
