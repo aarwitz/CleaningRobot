@@ -253,6 +253,23 @@ pseudo-labels into better on-device models.
   ~/.runpod_key)" https://rest.runpod.io/v1/pods/5t8jza01ekta74/stop`
   (then DELETE to stop storage billing).
 
+## 6c. Findings 2026-08-18 evening
+
+- **socks2 is light-blind**: same socks, same spots — daylight scores
+  0.79–0.86, evening scores 0.01–0.19 (head cam). The scout therefore finds
+  no targets at night and `robot eval` correctly VOIDS all trials (5/5 void,
+  nothing fabricated — the harness works). Consequences:
+  (a) v1 baseline eval must run in DAYLIGHT for a fair before/after vs v2;
+  (b) socks3 must train with strong HSV/brightness augmentation (ultralytics
+  defaults help; consider augmenting pseudo_v1 with gamma-jittered copies);
+  (c) longer-term: pseudo-label episodes collected across lighting.
+- Container recreation wipes ad-hoc pip deps: pi_bridge needs
+  `pip3 install msgpack websockets` after every recreate (put in Dockerfile
+  eventually). pi_bridge is still ad-hoc (not launch-managed) by design —
+  it depends on the RSL tunnel.
+- Training progress: openpi with wandb disabled logs NO loss lines — only
+  tqdm progress. Judge checkpoints by the eval harness, not the curve.
+
 ## 7. Operating notes / gotchas
 
 - Config truth lives in `docker/docker-compose.yml` env vars, **not** the

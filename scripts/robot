@@ -401,10 +401,15 @@ def mode_eval(a):
         return 2
     r = in_container('timeout 10 ros2 topic hz /head_yolo/detections '
                      '--window 3 2>&1 | head -1', timeout=16, capture=True)
-    if 'average rate' not in (r.stdout or ''):
-        print('  [preflight] head-yolo: DOWN (staging scout needs it)')
+    ok = 'average rate' in (r.stdout or '')
+    if not ok:
+        # same DDS discovery race as the wrist probe: fall back to pgrep
+        r = in_container("pgrep -f '[h]ead_yolo_node' | head -1",
+                         timeout=10, capture=True)
+        ok = bool((r.stdout or '').strip())
+    print(f'  [preflight] head-yolo: {"ok" if ok else "DOWN"}')
+    if not ok:
         return 2
-    print('  [preflight] head-yolo: ok')
     return in_container_tty(
         f'python3 {WS}/pi_eval.py --trials {a.trials} '
         f'--prompt {shlex.quote(a.prompt)} --watch-s {a.watch_s:.0f}')
