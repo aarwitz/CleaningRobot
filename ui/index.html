@@ -1527,6 +1527,15 @@ function telAction(act) {
 }
 
 function telSetArmed(on) {
+  // E-STOP is a server-side LATCH: arming only enables the command stream,
+  // which the node silently drops while latched. Arming in that state made
+  // the UI say ARMED while nothing moved (operator confusion 2026-08-19).
+  if (on && telEstop) {
+    $('telMeta').textContent = 'E-STOPPED — press CLEAR E-STOP first';
+    $('telMeta').style.color = 'var(--crit)';
+    logSystem('ARM refused: e-stop latched — press CLEAR E-STOP first');
+    return;
+  }
   telArmed = on;
   telReleaseAll();
   $('telArm').classList.toggle('on', on);
@@ -1651,6 +1660,10 @@ registerTopic({
                    : (s.link === 'recovering' ? 'var(--warn-txt)' : 'var(--crit-txt)');
 
     if (s.estop && !telEstop) { telEstop = true; $('telEstop').classList.add('tripped'); }
+    // mirror the CLEAR too: the server latch is the truth (a clear from
+    // another tab or scripts/robot must unlock this UI as well)
+    if (!s.estop && telEstop) { telEstop = false; $('telEstop').classList.remove('tripped'); }
+    if (s.estop && telArmed) { telSetArmed(false); }
 
     // Reach envelope: where the tool sits between r_min and r_max.
     const lim = s.limits || {};
