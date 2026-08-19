@@ -1581,6 +1581,7 @@ window.addEventListener('keydown', (ev) => {
   if (k === ' ') {                       // SPACE = E-STOP, armed or not
     telEstop = true; telSetArmed(false); telAction('estop');
     $('telEstop').classList.add('tripped');
+    $('telEstop').innerHTML = '&#8635; CLEAR E-STOP';
     ev.preventDefault(); return;
   }
   if (!telArmed) return;
@@ -1628,8 +1629,20 @@ setInterval(() => {
 /* --- buttons -------------------------------------------------------- */
 $('telArm').addEventListener('click', () => telSetArmed(!telArmed));
 $('telEstop').addEventListener('click', () => {
+  // Physical-estop metaphor: when tripped, the big red button IS the
+  // release (operators click the obvious red thing to un-stop; before
+  // this it re-fired estop on every click -- 2026-08-19).
+  if (telEstop) {
+    telAction('clear_estop');
+    telEstop = false;
+    $('telEstop').classList.remove('tripped');
+    $('telEstop').innerHTML = '&#9632; E-STOP';
+    logSystem('e-stop CLEARED (red button) — press ARM to drive');
+    return;
+  }
   telEstop = true; telSetArmed(false); telAction('estop');
   $('telEstop').classList.add('tripped');
+  $('telEstop').innerHTML = '&#8635; CLEAR E-STOP';
 });
 document.querySelectorAll('#telMode button').forEach(b =>
   b.addEventListener('click', () => telSetMode(b.dataset.mode)));
@@ -1659,10 +1672,12 @@ registerTopic({
     lk.style.color = (s.link === 'ok' && !stale) ? 'var(--good-txt)'
                    : (s.link === 'recovering' ? 'var(--warn-txt)' : 'var(--crit-txt)');
 
-    if (s.estop && !telEstop) { telEstop = true; $('telEstop').classList.add('tripped'); }
+    if (s.estop && !telEstop) { telEstop = true; $('telEstop').classList.add('tripped');
+      $('telEstop').innerHTML = '&#8635; CLEAR E-STOP'; }
     // mirror the CLEAR too: the server latch is the truth (a clear from
     // another tab or scripts/robot must unlock this UI as well)
-    if (!s.estop && telEstop) { telEstop = false; $('telEstop').classList.remove('tripped'); }
+    if (!s.estop && telEstop) { telEstop = false; $('telEstop').classList.remove('tripped');
+      $('telEstop').innerHTML = '&#9632; E-STOP'; }
     if (s.estop && telArmed) { telSetArmed(false); }
 
     // Reach envelope: where the tool sits between r_min and r_max.

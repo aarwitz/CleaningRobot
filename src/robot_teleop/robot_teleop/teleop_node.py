@@ -123,6 +123,9 @@ class TeleopNode(Node):
         self.estop = False
         self.last_cmd_time = 0.0
         self.seq = 0
+        # anti-hunt: fb x-history for the idle limit-cycle detector
+        self._hunt_hist = []
+        self._hunt_last_escape = 0.0
 
         # ── ramped actual velocities ──────────────────────────────────────
         self.v = {'ax': 0.0, 'ay': 0.0, 'az': 0.0,       # mm/s
@@ -383,6 +386,33 @@ class TeleopNode(Node):
         self.v['bw'] = ramp(self.v['bw'], want['bw'] * yaw_spd, w_acc, dt)
 
         if self.arm_ok:
+            # ── anti-hunt (2026-08-19): at gravity-neutral elbow poses the
+            # firmware's position hold limit-cycles (torE swings through
+            # zero; fb x oscillates ~10mm; operator saw "reaching in/out").
+            # With ZERO operator intent, watch fb x peak-to-peak over ~2s;
+            # sustained oscillation -> one goto 18mm up to move the elbow
+            # off its torque zero-crossing. Never fires while driving.
+            idle = all(abs(want[k]) < 1e-6
+                       for k in ('ax', 'ay', 'az', 'grip'))
+            fb = self.arm.last_fb or {}
+            if idle and fb.get('x') is not None:
+                now = time.time()
+                self._hunt_hist.append((now, fb['x']))
+                self._hunt_hist = [(t_, x_) for t_, x_ in self._hunt_hist
+                                   if now - t_ < 2.0]
+                xs = [x_ for _, x_ in self._hunt_hist]
+                if (len(xs) > 20 and max(xs) - min(xs) > 6.0
+                        and now - self._hunt_last_escape > 10.0
+                        and fb.get('z') is not None):
+                    self._hunt_last_escape = now
+                    self._hunt_hist.clear()
+                    self.get_logger().warn(
+                        'anti-hunt: idle limit-cycle detected '
+                        f'(x pp={max(xs)-min(xs):.1f}mm) -> escape +18mm z')
+                    self.arm.goto(fb['x'], fb.get('y', 0.0),
+                                  fb['z'] + 18.0, fb.get('t', 2.0))
+            elif not idle:
+                self._hunt_hist.clear()
             sx, sy, sz = self._limit_scale(self.v['ax'], self.v['ay'], self.v['az'])
             self.arm.jog(AXIS_X, self.v['ax'] * sx)
             self.arm.jog(AXIS_Y, self.v['ay'] * sy)
