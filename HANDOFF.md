@@ -230,9 +230,38 @@ pseudo-labels into better on-device models.
 
 ---
 
+## 6a. RESULT 2026-08-19: v1 vs v2 head-to-head (honest evals)
+
+Same scene, same 5-trial protocol, same claw-diff verify, all trials
+properly staged (scout 0.83-0.92, target r=239-261):
+
+  v1 (head-only, pi0_sock_v1):        0 held / 5 miss / 0 void
+  v2 (dual-camera, sock_v2_wrist):    0 held / 5 miss / 0 void
+
+v2's plumbing is CONFIRMED working end to end: wrist obs accepted, 12
+chunks executed per trial (~28s of policy control), verified stops, no
+inference errors. The policy acts but does not complete grasps. The
+wrist-camera hypothesis alone did NOT fix the close. Log: /demos/pi_evals.jsonl.
+
+Leading next hypothesis (flagged in the original 2026-08-15 review but
+NEVER IMPLEMENTED in the converter): grip-close transitions are ~1 frame
+in ~300 per episode — the loss barely sees the close event, and
+loss=0.0099 means it learned the dominant hover/approach modes.
+Candidate fixes, cheapest first:
+  1. Oversample frames around grip-value transitions in
+     convert_roarm_to_lerobot.py (weighted sampling or frame duplication).
+  2. Train longer (5k -> 15-30k) with early-stop on a held-out episode.
+  3. More contact-rich data: teleop-recorded grasps (the day-1
+     recommendation) -- scripted-teacher data demonstrates ONE sweep
+     motion; the policy may be imitating the sweep's approach without
+     its contact dynamics.
+Also: pi_eval should RECORD frames per trial (currently no visual record
+of what the policy did -- add DualRecorder to pi_eval before the next
+eval round).
+
 ## 6b. In flight (2026-08-18)
 
-- **π0 v2 training RUNNING on RunPod**: pod `5t8jza01ekta74` (A40, $0.44/hr,
+- (done; see 6a) π0 v2 training on RunPod: pod `5t8jza01ekta74` (A40, $0.44/hr,
   ssh via jetson key `~/.ssh/id_ed25519_runpod` -> root@69.30.85.129:22057).
   `pi0_roarm_sock_cartesian_wrist_lora --exp-name sock_v2_wrist`, 5000 steps,
   wandb disabled, log `/workspace/train.log`, data checksum-verified
@@ -249,9 +278,24 @@ pseudo-labels into better on-device models.
   stop, claw-diff verify from the high pose. BLOCKED on arm power for the
   v1 baseline -- run `robot eval --trials 5` once the PSU is on.
 - Container restarted: launch-managed yolo nodes verified live (4.4 Hz).
-- STOP THE POD when done: `curl -X POST -H "Authorization: Bearer $(cat
+- (done: both pods deleted, ~$7 total) STOP THE POD when done: `curl -X POST -H "Authorization: Bearer $(cat
   ~/.runpod_key)" https://rest.runpod.io/v1/pods/5t8jza01ekta74/stop`
   (then DELETE to stop storage billing).
+
+## 6b2. RSL serving ops (2026-08-19, learned the hard way)
+
+- RSL = RTX 3060 12GB + 15GB RAM. Loading an 8.8GB pi0 checkpoint
+  WHILE the DINO container runs OOM-livelocks the whole box (hours of
+  thrash, ssh barely responsive). SEQUENCE: `docker stop
+  dockerized_groundingsam-api-1` -> load/serve (426 on :8000) ->
+  `docker start` it back. Post-reboot both containers auto-start.
+- sudo password available from operator; sysrq/reboot -f works when
+  the box wedges. /swapfile (2G) exists and activates on boot.
+- The Jetson tunnels die with RSL: relaunch
+  `ssh -f -N -L 8002:localhost:8002 -L 8000:localhost:8000 -o HostKeyAlias=RSL aaron@100.110.113.91`
+  (use HostKeyAlias=RSL; the raw IP fails host key verification).
+- pkill/pgrep of remote patterns: ALWAYS bracket ([s]erve_policy) --
+  self-matches killed our own session twice.
 
 ## 6c. Findings 2026-08-18 evening
 
