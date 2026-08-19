@@ -438,6 +438,11 @@ class PickPipeline(BallPick):
             out.append((ax, ay, sc, cl[-1][3]))
             print(f'  [scout] sock {sc:.2f} ({len(cl)}/{rounds} rounds) -> '
                   f'arm ({ax:.0f},{ay:.0f}) r={math.hypot(ax, ay):.0f}')
+        out = [t for t in out
+               if math.hypot(t[0], t[1]) >= 180.0
+               or print(f'  [scout] target ({t[0]:.0f},{t[1]:.0f}) '
+                        f'r={math.hypot(t[0], t[1]):.0f} TOO CLOSE to '
+                        'chassis (<180) -- skipped')]
         out.sort(key=lambda p_: math.hypot(p_[0], p_[1]))
         if out and self.img is not None:
             self.publish_flywheel(
@@ -768,8 +773,12 @@ class PickPipeline(BallPick):
         if halfy:
             # start JUST outside the box edge (exact, not min with the
             # default -- operator: still too far left, 2026-08-19 #2).
-            # Cap at 90mm so a mega-box cannot send the start absurdly out.
-            tight = max(25.0, min(90.0, halfy + 12.0))
+            # HARD CAP 55mm: the head box overstates extent badly at close
+            # range (oblique view computed half-y=135mm for a normal sock
+            # and drove the approach to 90 -- WORSE than default; run 2
+            # attempt 1). A real sock's half-extent is 30-50mm; beyond 55
+            # the estimate is noise, not geometry.
+            tight = max(25.0, min(55.0, halfy + 12.0))
             print(f'  [grasp] box-edge sweep start: approach_dy '
                   f'{adx:.0f} -> {tight:.0f} (box half-y {halfy:.0f}mm)')
             adx = tight
@@ -1428,7 +1437,10 @@ def main():
             miss_n += 1
             continue
         rng, bearing = math.hypot(bx, by), math.atan2(by, bx)
-        if rng > 345.0 or abs(by) > 60.0:
+        # coarse-path staging gate ONLY: wrist-only aimed hovers routinely
+        # have |y|>60 and their reach is enforced later (run-2 attempt 2
+        # exited here at hover y=-71, 2026-08-19)
+        if not a.wrist_only and (rng > 345.0 or abs(by) > 60.0):
             if not a.allow_drive:
                 print(f'  target at r={rng:.0f} y={by:.0f} needs staging but '
                       '--allow-drive is off. Stopping here per operator gate.')
@@ -1569,6 +1581,15 @@ def main():
                     idx += 1
                 miss_n += 1
                 continue
+        if math.hypot(bx, by) < 180.0:
+            print(f'  [guard] pick ({bx:.0f},{by:.0f}) inside the chassis '
+                  'keep-out (r<180) -- skipping, no grasp')
+            miss_n += 1
+            if rec:
+                rec.finish(False, {'object': a.object,
+                                   'note': f'inner keep-out r={math.hypot(bx, by):.0f}'})
+                idx += 1
+            continue
         held = False
         try:
             if c.grasp(bx, by, a.strategy, rec=rec):
