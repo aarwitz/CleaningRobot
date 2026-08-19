@@ -103,6 +103,16 @@ class BallPick(Cycle):
         all 3" (operator request 2026-08-16)."""
         try:
             vis = frame.copy()
+            # Stage + capture time burned into the image: the relay
+            # rebroadcasts stale overlays at 1 Hz with fresh timestamps, so
+            # the operator could not tell WHICH pipeline moment a panel
+            # showed (head=verify vs wrist=refine looked simultaneous --
+            # operator confusion 2026-08-19).
+            stamp = time.strftime('%H:%M:%S')
+            label_txt = f"{meta.get('stage', '?')}  @{stamp}"
+            cv2.rectangle(vis, (0, 456), (640, 480), (20, 20, 20), -1)
+            cv2.putText(vis, label_txt, (8, 474),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (60, 220, 255), 2)
             for rbox, reason, rscore in (rejects or []):
                 rx0, ry0, rx1, ry1 = (int(t) for t in rbox)
                 cv2.rectangle(vis, (rx0, ry0), (rx1, ry1), (90, 90, 255), 1)
