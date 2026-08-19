@@ -688,6 +688,10 @@ class PickPipeline(BallPick):
                 return bx, by, None
         wbox = dets[0]['box']
         wu, wv = (wbox[0] + wbox[2]) / 2, (wbox[1] + wbox[3]) / 2
+        # arm-y maps from wrist px-u (Jacobian: ly ~ -du * mm_per_px), so
+        # the box WIDTH bounds the object's y-extent -- used to start the
+        # sweep just outside the box instead of a fixed 60mm out
+        self.last_box_halfy_mm = 0.55 * (wbox[2] - wbox[0]) / 2.0
         if anc is None:
             print(f'  [refine] wrist sees it at px ({wu:.0f},{wv:.0f}); no '
                   'anchor yet (self-calibrates from successful picks)')
@@ -755,6 +759,18 @@ class PickPipeline(BallPick):
         # that sits in the corridor (audit 2026-08-02: three double-grasp
         # episodes) -- shorten the runway so the jaws close on ONE object
         adx = p['approach_dy']
+        # BOX-TIGHT approach (operator request 2026-08-19): start the sweep
+        # just barely outside the DETECTED bounding box -- a fixed 60mm
+        # runway reaches past the box edge and can scoop neighbors that
+        # were never detected at all. 12mm margin for jaw width; 25mm floor
+        # keeps enough runway for the close-while-descending motion.
+        halfy = getattr(self, 'last_box_halfy_mm', None)
+        if halfy:
+            tight = max(25.0, min(adx, halfy + 12.0))
+            if tight < adx:
+                print(f'  [grasp] box-tight sweep: approach_dy '
+                      f'{adx:.0f} -> {tight:.0f} (box half-y {halfy:.0f}mm)')
+                adx = tight
         for nx, ny in getattr(self, 'neighbors', []):
             if abs(nx - bx) < 55.0 and 15.0 < ny - by < adx + 40.0:
                 adx = 30.0
@@ -1297,6 +1313,8 @@ def main():
 
     signal.signal(signal.SIGTERM, _halt_trap)
     signal.signal(signal.SIGINT, _halt_trap)
+    signal.signal(signal.SIGHUP, _halt_trap)   # ssh session drop
+    signal.signal(signal.SIGPIPE, _halt_trap)  # ssh pipe kill (seen -13)
 
     if not c.wait_ready() or not c.wait_depth():
         print('ABORT: teleop/camera/depth not ready')
@@ -1431,9 +1449,12 @@ def main():
                 # locked on its scouted target), then the fixed spots:
                 # dropped objects scatter beyond the single nominal hover's
                 # wrist FOV
+                # fixed spots inherit the PRIMARY scout lock: unguarded
+                # scan-hover refines walked 214mm to a leftover object
+                # (ep_0139 picked at y=+167 vs scout y=-47, 2026-08-19)
                 for sx, sy, slock in list(scout_hovers) + [
-                        (260.0, 70.0, None), (320.0, -70.0, None),
-                        (250.0, -70.0, None), (315.0, 60.0, None)]:
+                        (260.0, 70.0, scout_lock), (320.0, -70.0, scout_lock),
+                        (250.0, -70.0, scout_lock), (315.0, 60.0, scout_lock)]:
                     print(f'  [wrist-only] scanning hover ({sx:.0f},{sy:.0f})'
                           + (f' locked ({slock[0]:.0f},{slock[1]:.0f})'
                              if slock else ''))

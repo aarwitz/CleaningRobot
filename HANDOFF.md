@@ -244,6 +244,18 @@ is now called from BOTH control branches (no cmd stream == definitionally
 idle); (b) `pick_pipeline` tucks the arm on NORMAL exit too (traps already
 covered abnormal ends; --keep skips).
 
+**v4 (2026-08-19, same day):** v3 introduced a WORSE failure — during a
+scripted lift the guard read the commanded motion as oscillation (no cmd
+stream ≠ idle; scripts drive via goto on /teleop/action) and injected
+r+45 escape gotos into the lift stream: the guard CAUSED violent shaking
+mid-motion (operator-witnessed; 5 firings logged during ep_0139). v4
+gates on goto-quiet (no goto within 2.5 s) AND direction reversals
+(revs≥4 — a limit cycle reverses; commanded motion is monotonic).
+Also from the same episode: fixed scan hovers now inherit the primary
+scout lock (an unguarded scan-hover refine walked 214 mm to a leftover
+object), and the pipeline halt-trap now catches SIGHUP/SIGPIPE (a
+dropped ssh killed the run with SIGPIPE, bypassing the lift).
+
 **Remaining exposure:** a script PAUSED mid-motion at a neutral pose
 (e.g. blocked on a dead DINO call) can hunt until the call times out —
 bounded timeouts keep the window small, and the node-side guard now

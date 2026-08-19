@@ -126,6 +126,7 @@ class TeleopNode(Node):
         # anti-hunt: fb x-history for the idle limit-cycle detector
         self._hunt_hist = []
         self._hunt_last_escape = 0.0
+        self._last_goto = 0.0     # scripted motion: goto stream on /teleop/action
 
         # ── ramped actual velocities ──────────────────────────────────────
         self.v = {'ax': 0.0, 'ay': 0.0, 'az': 0.0,       # mm/s
@@ -181,6 +182,8 @@ class TeleopNode(Node):
 
     def _action_cb(self, msg):
         act = msg.data.strip()
+        if act.startswith(('goto:', 'raw:')) or act == 'home':
+            self._last_goto = time.time()
         # goto arrives as a streamed setpoint train during scripted runs; logging
         # every one of them at 10 Hz buries everything else in the log.
         if not act.startswith('goto:'):
@@ -366,11 +369,21 @@ class TeleopNode(Node):
         if fb.get('x') is None or fb.get('z') is None:
             return
         now = time.time()
+        # SCRIPTED MOTION IS NOT IDLE (v4, 2026-08-19): v3 read a script's
+        # commanded lift as oscillation and injected escape gotos into its
+        # stream -- the guard CAUSED the violent shaking it exists to stop.
+        # Gate 1: no goto within 2.5s. Gate 2: a true limit cycle REVERSES
+        # direction repeatedly; commanded motion is monotonic.
+        if now - self._last_goto < 2.5:
+            self._hunt_hist.clear()
+            return
         self._hunt_hist.append((now, fb['x']))
         self._hunt_hist = [(t_, x_) for t_, x_ in self._hunt_hist
                            if now - t_ < 2.0]
         xs = [x_ for _, x_ in self._hunt_hist]
-        if (len(xs) > 20 and max(xs) - min(xs) > 6.0
+        revs = sum(1 for i in range(2, len(xs))
+                   if (xs[i] - xs[i-1]) * (xs[i-1] - xs[i-2]) < -0.01)
+        if (len(xs) > 20 and max(xs) - min(xs) > 6.0 and revs >= 4
                 and now - self._hunt_last_escape > 10.0):
             again = now - self._hunt_last_escape < 40.0
             dx, dz = (45.0, 35.0) if again else (22.0, 12.0)
