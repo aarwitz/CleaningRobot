@@ -766,11 +766,16 @@ class PickPipeline(BallPick):
         # keeps enough runway for the close-while-descending motion.
         halfy = getattr(self, 'last_box_halfy_mm', None)
         if halfy:
-            tight = max(25.0, min(adx, halfy + 12.0))
-            if tight < adx:
-                print(f'  [grasp] box-tight sweep: approach_dy '
-                      f'{adx:.0f} -> {tight:.0f} (box half-y {halfy:.0f}mm)')
-                adx = tight
+            # start JUST outside the box edge (exact, not min with the
+            # default -- operator: still too far left, 2026-08-19 #2).
+            # Cap at 90mm so a mega-box cannot send the start absurdly out.
+            tight = max(25.0, min(90.0, halfy + 12.0))
+            print(f'  [grasp] box-edge sweep start: approach_dy '
+                  f'{adx:.0f} -> {tight:.0f} (box half-y {halfy:.0f}mm)')
+            adx = tight
+        else:
+            print(f'  [grasp] no box extent known -- default approach_dy '
+                  f'{adx:.0f}')
         for nx, ny in getattr(self, 'neighbors', []):
             if abs(nx - bx) < 55.0 and 15.0 < ny - by < adx + 40.0:
                 adx = 30.0
@@ -1380,15 +1385,17 @@ def main():
                 return hx_, hy_
 
             scout_lock = None
+            scout_box = None
             if a.hover:
                 bx, by = (float(v) for v in a.hover.split(','))
             elif getattr(c, 'use_wrist_yolo', False):
                 # (hover_x, hover_y, scouted target) -- the target rides
                 # along as refine's lock for cross-camera consistency
-                scout_hovers = [(*hover_for(t[0], t[1]), (t[0], t[1]))
+                scout_hovers = [(*hover_for(t[0], t[1]), (t[0], t[1]),
+                                 t[3] if len(t) > 3 else None)
                                 for t in c.head_scout(a.prompt)]
                 if scout_hovers:
-                    bx, by, scout_lock = scout_hovers.pop(0)
+                    bx, by, scout_lock, scout_box = scout_hovers.pop(0)
                     print(f'  [wrist-only] scout-aimed hover '
                           f'({bx:.0f},{by:.0f}) locked on '
                           f'({scout_lock[0]:.0f},{scout_lock[1]:.0f})')
@@ -1452,9 +1459,11 @@ def main():
                 # fixed spots inherit the PRIMARY scout lock: unguarded
                 # scan-hover refines walked 214mm to a leftover object
                 # (ep_0139 picked at y=+167 vs scout y=-47, 2026-08-19)
-                for sx, sy, slock in list(scout_hovers) + [
-                        (260.0, 70.0, scout_lock), (320.0, -70.0, scout_lock),
-                        (250.0, -70.0, scout_lock), (315.0, 60.0, scout_lock)]:
+                for sx, sy, slock, _sbox in list(scout_hovers) + [
+                        (260.0, 70.0, scout_lock, None),
+                        (320.0, -70.0, scout_lock, None),
+                        (250.0, -70.0, scout_lock, None),
+                        (315.0, 60.0, scout_lock, None)]:
                     print(f'  [wrist-only] scanning hover ({sx:.0f},{sy:.0f})'
                           + (f' locked ({slock[0]:.0f},{slock[1]:.0f})'
                              if slock else ''))
@@ -1483,6 +1492,13 @@ def main():
                           '(bias-corrected) for operator approval')
                     bx, by = sbx, sby
                     wrist_px = (0, 0)
+                    # head-box y-extent -> sweep start (head px-u maps to
+                    # arm-y at ~Z/fx mm/px; Z ~= scout range)
+                    if scout_box is not None and c.K:
+                        fx = c.K[0]
+                        zmm = max(200.0, math.hypot(*scout_lock))
+                        c.last_box_halfy_mm = ((scout_box[2] - scout_box[0])
+                                               / 2.0) * (zmm / fx)
                 else:
                     print('  [wrist-only] wrist cannot see the object -- '
                           'skipping (no blind grasp at the nominal spot)')
@@ -1592,6 +1608,12 @@ def main():
             c.grip(WIDE, secs=0.8)
             c.move(*OBSERVE, t=GRIP_CLOSED, speed=90.0)
 
+    # NORMAL-EXIT TUCK (v2 of the fix -- v1's text-patch silently missed
+    # and was deployed unverified, 2026-08-19): a session ending at a
+    # hover/drop pose parks the arm in the elbow's neutral band (5b).
+    if not a.keep:
+        c.move(255.0, 0.0, 60.0, t=GRIP_CLOSED, speed=90.0)
+        print('  [exit] tucked safe pose')
     print(f'\n{ok_n} held / {miss_n} missed'
           + (f' -> {root}' if a.record else ''))
     c.destroy_node()

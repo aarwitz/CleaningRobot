@@ -379,11 +379,20 @@ class TeleopNode(Node):
             return
         self._hunt_hist.append((now, fb['x']))
         self._hunt_hist = [(t_, x_) for t_, x_ in self._hunt_hist
-                           if now - t_ < 2.0]
+                           if now - t_ < 3.0]
         xs = [x_ for _, x_ in self._hunt_hist]
-        revs = sum(1 for i in range(2, len(xs))
-                   if (xs[i] - xs[i-1]) * (xs[i-1] - xs[i-2]) < -0.01)
-        if (len(xs) > 20 and max(xs) - min(xs) > 6.0 and revs >= 4
+        # v4.1: feedback repeats samples between 8Hz polls, so consecutive-
+        # triple reversal counting undercounted a ~1Hz cycle to <4 and the
+        # guard went blind (6th live sighting). Dedupe repeats, count
+        # reversals on CHANGED samples, threshold 3 over a 3s window.
+        dx_seq = []
+        for x_ in xs:
+            if not dx_seq or abs(x_ - dx_seq[-1]) > 0.05:
+                dx_seq.append(x_)
+        revs = sum(1 for i in range(2, len(dx_seq))
+                   if (dx_seq[i] - dx_seq[i-1])
+                   * (dx_seq[i-1] - dx_seq[i-2]) < -0.01)
+        if (len(xs) > 20 and max(xs) - min(xs) > 6.0 and revs >= 3
                 and now - self._hunt_last_escape > 10.0):
             again = now - self._hunt_last_escape < 40.0
             dx, dz = (45.0, 35.0) if again else (22.0, 12.0)
