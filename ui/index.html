@@ -487,11 +487,18 @@
         <button data-act="reset_arm">R RESET</button>
         <button data-act="clear_estop">CLEAR E-STOP</button>
       </div>
-      <div class="tel-aux" style="margin-top:4px">
-        <button data-act="rec:start" style="color:#e66">&#9679; REC</button>
-        <button data-act="rec:stop:held">&#10003; STOP - HELD</button>
-        <button data-act="rec:stop:miss">&#10007; STOP - MISS</button>
-        <button data-act="rec:abort">ABORT TAKE</button>
+      <div id="recPanel" style="margin-top:6px;border:1px solid var(--line);border-radius:4px;padding:6px 8px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="letter-spacing:2px;color:var(--dim)">DEMO RECORDER</span>
+          <span id="recStatus" style="color:var(--muted)">OFFLINE — no recorder session</span>
+        </div>
+        <div class="tel-aux" style="margin-top:5px">
+          <button id="recToggle" data-act="rec:start" disabled>&#9679; START TAKE</button>
+          <button id="recHeld" data-act="rec:stop:held" disabled>&#10003; HELD</button>
+          <button id="recMiss" data-act="rec:stop:miss" disabled>&#10007; MISS</button>
+          <button id="recAbort" data-act="rec:abort" disabled>ABORT</button>
+        </div>
+        <div id="recLast" style="margin-top:4px;color:var(--muted);font-size:12px">&nbsp;</div>
       </div>
 
       <div class="tel-hint">
@@ -1659,6 +1666,52 @@ document.querySelectorAll('.tel-aux button').forEach(b =>
     if (a === 'led') { telLed = !telLed; telAction('led:' + (telLed ? 255 : 0)); return; }
     telAction(a);
   }));
+
+/* --- demo recorder panel ------------------------------------------- */
+let recSeen = 0;
+registerTopic({
+  name: '/teleop/record_state', type: 'std_msgs/String', throttle: 200,
+  handler: (m) => {
+    let r; try { r = JSON.parse(m.data); } catch (e) { return; }
+    recSeen = Date.now();
+    const rec = !!r.recording;
+    $('recToggle').disabled = rec;
+    $('recHeld').disabled = !rec;
+    $('recMiss').disabled = !rec;
+    $('recAbort').disabled = !rec;
+    const st = $('recStatus');
+    if (rec) {
+      st.innerHTML = '&#9679; RECORDING ep_' + String(r.ep).padStart(4, '0') +
+                     ' &middot; ' + r.frames + ' frames &middot; ' +
+                     Math.round(r.secs) + 's';
+      st.style.color = 'var(--crit-txt)';
+      $('recPanel').style.borderColor = 'var(--crit)';
+    } else {
+      st.textContent = 'READY — ' + (r.session_count || 0) +
+                       ' takes this session (' + (r.object || '?') + ')';
+      st.style.color = 'var(--good-txt)';
+      $('recPanel').style.borderColor = 'var(--line)';
+    }
+    if (r.last) {
+      const l = r.last;
+      $('recLast').textContent = 'last take: ep_' +
+        String(l.ep).padStart(4, '0') + ' → ' + l.label +
+        (l.frames ? ' (' + l.frames + ' frames banked)' : ' (deleted)');
+      $('recLast').style.color = l.label === 'HELD' ? 'var(--good-txt)'
+        : (l.label === 'MISS' ? 'var(--warn-txt)' : 'var(--muted)');
+    }
+  }
+});
+// recorder session death: no state for 4s -> grey everything out
+setInterval(() => {
+  if (Date.now() - recSeen > 4000) {
+    $('recStatus').textContent = 'OFFLINE — no recorder session';
+    $('recStatus').style.color = 'var(--muted)';
+    $('recPanel').style.borderColor = 'var(--line)';
+    for (const id of ['recToggle', 'recHeld', 'recMiss', 'recAbort'])
+      $(id).disabled = true;
+  }
+}, 2000);
 
 /* --- state HUD ------------------------------------------------------ */
 registerTopic({

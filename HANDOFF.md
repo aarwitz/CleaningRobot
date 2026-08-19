@@ -225,11 +225,14 @@ entirely below ROS. The elbow's lever direction is radial, hence
 "reaching in and out." Pressing the arm against the floor (§5.3) is the
 obstructed-hold variant of the same firmware hunting.
 
-**Fix (in `teleop_node._control_tick`, deployed + live-verified):**
+**Fix (in `teleop_node._control_tick`, deployed; v2 escape vector):**
 with idle operator intent, the node tracks feedback-x peak-to-peak over
-a 2 s window; >6 mm sustained → ONE `goto` +18 mm z to move the elbow off
-its zero-crossing, ≤1 per 10 s, logged as `anti-hunt: idle limit-cycle
-detected`. Verified: 9.7 mm oscillation → 0.0 mm over 74 samples.
+a 2 s window; >6 mm sustained → one `goto` escape, ≤1 per 10 s, logged.
+v1 escaped +18 mm z and FAILED at inward radii — the neutral torque band
+is TALL there; three vertical escapes in 30 s never left it (torE stayed
+~0, cycle re-established each time; live 2026-08-19). v2 escapes
+RADIALLY OUTWARD (r+22, z+12), which changes the elbow angle directly,
+and ESCALATES to r+45/z+35 if a second escape fires within 40 s.
 Never fires while the operator is actively commanding.
 
 **Residual exposure (known, accepted):** scripted pipelines pass through

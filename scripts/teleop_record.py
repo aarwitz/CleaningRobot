@@ -55,8 +55,15 @@ class TeleopRecorder(Node):
         self.create_subscription(String, '/teleop/action', self._act, 10)
         self.fw = self.create_publisher(CompressedImage,
                                         '/flywheel/head/overlay', 2)
+        # machine-readable state for the console's recorder panel: the
+        # buttons were stateless and the operator could not tell whether
+        # recording was live or what got labeled (operator, 2026-08-19)
+        self.state_pub = self.create_publisher(String,
+                                               '/teleop/record_state', 2)
+        self.last_result = None      # {'ep': int, 'label': str}
         self.create_timer(1.0 / RATE_HZ, self._tick)
         self.create_timer(1.0, self._hud)
+        self.create_timer(0.5, self._pub_state)
         print(f'[teleop-record] ready; waiting for rec:start '
               f'(object={args.object})', flush=True)
 
@@ -90,9 +97,22 @@ class TeleopRecorder(Node):
         elif act == 'rec:abort' and self.ep is not None:
             self.ep['traj'].close()
             shutil.rmtree(self.ep['dir'])
+            self.last_result = {'ep': self.ep['idx'], 'label': 'ABORTED',
+                                'frames': 0}
             print(f'[teleop-record] ✗ aborted ep_{self.ep["idx"]:04d} '
                   '(deleted)', flush=True)
             self.ep = None
+
+    def _pub_state(self):
+        st = {'running': True, 'recording': self.ep is not None,
+              'object': self.a.object, 'session_count': self.n_done}
+        if self.ep is not None:
+            st['ep'] = self.ep['idx']
+            st['frames'] = self.ep['i']
+            st['secs'] = round(time.time() - self.ep['t0'], 1)
+        if self.last_result:
+            st['last'] = self.last_result
+        self.state_pub.publish(String(data=json.dumps(st)))
 
     def _finish(self, held):
         e = self.ep
@@ -106,6 +126,9 @@ class TeleopRecorder(Node):
                         'live (watching the claw)'}
         (e['dir'] / 'meta.json').write_text(json.dumps(meta, indent=1))
         self.n_done += 1
+        self.last_result = {'ep': e['idx'],
+                            'label': 'HELD' if held else 'MISS',
+                            'frames': e['i']}
         print(f'[teleop-record] ■ ep_{e["idx"]:04d}: {e["i"]} frames, '
               f'{"HELD" if held else "miss"} '
               f'({self.n_done} this session)', flush=True)

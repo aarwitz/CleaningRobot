@@ -404,13 +404,24 @@ class TeleopNode(Node):
                 if (len(xs) > 20 and max(xs) - min(xs) > 6.0
                         and now - self._hunt_last_escape > 10.0
                         and fb.get('z') is not None):
+                    # Escape RADIALLY OUTWARD (+z secondary): the neutral
+                    # torque band is TALL at inward radii -- three vertical
+                    # +18mm escapes in 30s never left it (torE stayed ~0,
+                    # cycle re-established each time; live 2026-08-19).
+                    # Moving r changes the elbow angle directly. Escalate
+                    # on repeats within 40s.
+                    again = now - self._hunt_last_escape < 40.0
+                    dx, dz = (45.0, 35.0) if again else (22.0, 12.0)
                     self._hunt_last_escape = now
                     self._hunt_hist.clear()
                     self.get_logger().warn(
-                        'anti-hunt: idle limit-cycle detected '
-                        f'(x pp={max(xs)-min(xs):.1f}mm) -> escape +18mm z')
-                    self.arm.goto(fb['x'], fb.get('y', 0.0),
-                                  fb['z'] + 18.0, fb.get('t', 2.0))
+                        'anti-hunt: idle limit-cycle '
+                        f'(x pp={max(xs)-min(xs):.1f}mm) -> escape '
+                        f'{"ESCALATED " if again else ""}r+{dx:.0f} z+{dz:.0f}')
+                    r = math.hypot(fb['x'], fb.get('y', 0.0)) or 1.0
+                    self.arm.goto(fb['x'] * (r + dx) / r,
+                                  fb.get('y', 0.0) * (r + dx) / r,
+                                  fb['z'] + dz, fb.get('t', 2.0))
             elif not idle:
                 self._hunt_hist.clear()
             sx, sy, sz = self._limit_scale(self.v['ax'], self.v['ay'], self.v['az'])
