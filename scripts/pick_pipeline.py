@@ -464,7 +464,7 @@ class PickPipeline(BallPick):
 
     # ── refine: wrist cam from the pre-grasp hover ──────────────────────────
     def refine(self, bx, by, prompt, gz, cap=65.0, lock_xy=None,
-               claw_whitelist=None, hard_lock=None):
+               claw_whitelist=None, hard_lock=None, hard_gate=200.0):
         """Hover above the coarse target, detect in the WRIST frame, correct
         (bx, by) by the offset from the grasp anchor. Returns possibly
         corrected (bx, by); no-ops gracefully without wrist frames/anchor."""
@@ -532,7 +532,7 @@ class PickPipeline(BallPick):
                       'real floor object, not the claw')
                 return self.refine(bx, by, prompt, gz, cap=cap,
                                    lock_xy=lock_xy or (bx, by),
-                                   hard_lock=hard_lock,
+                                   hard_lock=hard_lock, hard_gate=hard_gate,
                                    claw_whitelist=mobile)
             print('  [refine] parallax: detections static -> genuinely the '
                   'claw')
@@ -599,7 +599,7 @@ class PickPipeline(BallPick):
             # scout-vs-pick pairs and the gate re-tightened.
             off = [d_ for d_ in dets if math.hypot(
                 bx + corr_of(d_['box'])[0] - hard_lock[0],
-                by + corr_of(d_['box'])[1] - hard_lock[1]) > 200.0]
+                by + corr_of(d_['box'])[1] - hard_lock[1]) > hard_gate]
             for d_ in off:
                 dd = math.hypot(bx + corr_of(d_['box'])[0] - hard_lock[0],
                                 by + corr_of(d_['box'])[1] - hard_lock[1])
@@ -1409,9 +1409,16 @@ def main():
             lock = (bx, by)
             for _ in range(3):
                 px_prev = (bx, by)
+                # TRACKING-TIGHT gate (2026-08-19): first sighting used the
+                # wide 200mm gate (scout bias); once an object is accepted,
+                # convergence passes hard-gate at 80mm around it -- in
+                # clutter, dets of a NEIGHBOR sock alternated through the
+                # wide gate and the corrections ping-ponged (+42/-60/+47,
+                # ep_0129: grasped between two socks).
                 bx, by, wrist_px = c.refine(bx, by, a.prompt,
                                             STRATEGIES[a.strategy]['gz'],
-                                            lock_xy=lock)
+                                            lock_xy=lock, hard_lock=lock,
+                                            hard_gate=80.0)
                 if wrist_px is None:
                     bx, by = px_prev       # keep last good estimate
                     wrist_px = (0, 0)      # target was seen; do not abort

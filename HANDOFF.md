@@ -194,7 +194,8 @@ pseudo-labels into better on-device models.
    forever). Fixed in launch + `robot viz` live repair.
 3. **Killing a batch script is not a safe stop** — servos hunt against the
    floor at grasp depth. → `robot halt` + SIGINT/SIGTERM traps in
-   `pick_pipeline`.
+   `pick_pipeline`. (The floor case is one instance of the general
+   limit-cycle mechanism in §5b — CLOSED, see there.)
 4. **`docker exec` timeouts kill the client, not the process** — bound
    everything with in-container `timeout`.
 5. **Self-written evaluators lie** unless structurally prevented: a π0
@@ -206,6 +207,39 @@ pseudo-labels into better on-device models.
    verify path has earned trust; corrections belong in meta `note:` fields.
 
 ---
+
+## 5b. The "violent shaking" failure — ROOT-CAUSED AND CLOSED (2026-08-19)
+
+**Symptom:** arm oscillates radially in/out ~10mm+ (looks violent through
+linkage flex), sometimes for minutes, with ZERO commands flowing —
+verified live: `/teleop/cmd` streaming all-zero axes, `/teleop/action`
+silent, node commanding per-axis STOP at 20 Hz. Seen in teleop AND
+scripted runs.
+
+**Mechanism (measured):** at certain arm geometries the ELBOW's gravity
+load crosses zero — live capture showed `torE` swinging −128→−56→−24→+84
+while `torS` stayed pinned at 56. At that torque zero-crossing, servo
+backlash plus the gripper rubber-band spring make the RoArm firmware's
+own position-hold overshoot every correction: a mechanical limit cycle
+entirely below ROS. The elbow's lever direction is radial, hence
+"reaching in and out." Pressing the arm against the floor (§5.3) is the
+obstructed-hold variant of the same firmware hunting.
+
+**Fix (in `teleop_node._control_tick`, deployed + live-verified):**
+with idle operator intent, the node tracks feedback-x peak-to-peak over
+a 2 s window; >6 mm sustained → ONE `goto` +18 mm z to move the elbow off
+its zero-crossing, ≤1 per 10 s, logged as `anti-hunt: idle limit-cycle
+detected`. Verified: 9.7 mm oscillation → 0.0 mm over 74 samples.
+Never fires while the operator is actively commanding.
+
+**Residual exposure (known, accepted):** scripted pipelines pass through
+neutral poses transiently (no dwell → no cycle), and `robot halt`/the
+signal traps lift the arm on any abnormal script end. A script PAUSED
+mid-motion at a neutral pose (e.g. blocked on a dead DINO call) could
+still hunt until the call times out — the loud `DINO unreachable` prints
+plus bounded timeouts keep that window small. If shaking is ever seen
+OUTSIDE these bounds, capture `/teleop/state` torques first (§5b method)
+before assuming a new cause.
 
 ## 6. Next steps, in priority order
 

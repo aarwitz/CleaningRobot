@@ -49,8 +49,8 @@ def iou(a, b):
     return inter / ua if ua > 0 else 0.0
 
 
-def detect(path, min_score, img_wh=(640, 480)):
-    """DINO + counter-prompt + min-area + mega-box gates.
+def detect(path, min_score, img_wh=(640, 480), cam='head'):
+    """DINO + counter-prompt + min-area + camera-aware mega-box gates.
     Returns [(box, score)]."""
     W, H = img_wh
     dets = dino_client.detect(str(path), PROMPT, confidence=min_score)
@@ -64,10 +64,18 @@ def detect(path, min_score, img_wh=(640, 480)):
         bw, bh = b[2] - b[0], b[3] - b[1]
         if bw * bh < MIN_AREA:
             continue
-        # mega-box gate: DINO's frame-wide claw/floor strips are label
-        # poison (spot-checked 2026-08-16: 638px-wide "sock" strips)
-        if bw > 0.85 * W or bh > 0.85 * H or bw * bh > 0.55 * W * H:
-            continue
+        # Mega-box gate, CAMERA-AWARE (v2 fix): the v1 gate (0.85W/0.55
+        # area on all frames) also killed legitimate wrist labels -- a sock
+        # centimeters from the wrist lens genuinely fills most of the
+        # frame, so socks3 trained wrist-blind (measured: 0.06-0.09 on
+        # wrist socks). Head keeps the tight gate (its socks are always
+        # small); wrist rejects only near-full-frame strips.
+        if cam == 'head':
+            if bw > 0.85 * W or bh > 0.85 * H or bw * bh > 0.55 * W * H:
+                continue
+        else:
+            if bw > 0.95 * W and bh > 0.90 * H:
+                continue
         hit = next((n for n in neg if iou(b, n['box']) > 0.5 and
                     (n.get('confidence') or n.get('score') or 0) > s), None)
         if hit:
@@ -131,7 +139,7 @@ def main():
             per_frame = []
             for f in frames:
                 try:
-                    per_frame.append((f, detect(f, a.min_score)))
+                    per_frame.append((f, detect(f, a.min_score, cam=cam)))
                 except Exception as e:
                     stats['dino_fail'] += 1
                     print(f'  [dino] {f.name}: {e}')

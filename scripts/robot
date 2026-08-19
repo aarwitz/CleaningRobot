@@ -22,6 +22,8 @@ Modes:
   robot classic [--go|--halt|--off]     classic YOLO 2D->3D depth pick pipeline
   robot eval [--trials N]               honest pi0 eval: scout-staged trials,
                                         claw-diff verify, voids never count
+  robot teleop-record [--object X]      pure recorder for operator-driven
+                                        episodes (REC buttons in console)
   robot halt                            safe stop: kill pipelines, disarm pi,
                                         lift to tucked pose (grip closed)
   robot stow                            tucked safe pose, gripper open
@@ -415,6 +417,18 @@ def mode_eval(a):
         f'--prompt {shlex.quote(a.prompt)} --watch-s {a.watch_s:.0f}')
 
 
+def mode_teleop_record(a):
+    # pure recorder -- commands NOTHING; preflight ensures the operator's
+    # rig and both cameras are actually live before a session starts
+    if not preflight(['teleop', 'wrist']):
+        return 2
+    print('  [teleop-record] running (Ctrl-C or --max-min ends session); '
+          'REC buttons live in the console')
+    return in_container_tty(
+        f'python3 {WS}/teleop_record.py --object {shlex.quote(a.object)} '
+        f'--max-min {a.max_min:.0f}')
+
+
 def mode_halt(_a):
     """Safe stop after batch runs / interrupts (HANDOFF §5.3): a killed batch
     script leaves the arm holding its last commanded pose; at grasp depth the
@@ -556,6 +570,9 @@ def main():
     p.add_argument('--trials', type=int, default=3)
     p.add_argument('--prompt', default='pick up the sock')
     p.add_argument('--watch-s', type=float, default=40.0)
+    p = sub.add_parser('teleop-record')
+    p.add_argument('--object', default='sock')
+    p.add_argument('--max-min', type=float, default=180.0)
     sub.add_parser('halt')
     sub.add_parser('stow')
     sub.add_parser('estop')
@@ -572,7 +589,7 @@ def main():
     code = {'status': mode_status, 'pick': mode_pick, 'pi': mode_pi,
             'calibrate': mode_calibrate, 'anchor': mode_anchor,
             'viz': mode_viz, 'classic': mode_classic, 'eval': mode_eval,
-            'halt': mode_halt,
+            'teleop-record': mode_teleop_record, 'halt': mode_halt,
             'stow': mode_stow, 'estop': mode_estop}[a.mode](a)
     audit(a.mode, sys.argv[1:], code)
     return code
