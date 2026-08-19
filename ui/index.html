@@ -500,6 +500,16 @@
         </div>
         <div id="recLast" style="margin-top:4px;color:var(--muted);font-size:12px">&nbsp;</div>
       </div>
+      <div id="appPanel" style="margin-top:6px;border:1px solid var(--line);border-radius:4px;padding:6px 8px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="letter-spacing:2px;color:var(--dim)">PICK APPROVAL</span>
+          <span id="appStatus" style="color:var(--muted)">no pick pending</span>
+        </div>
+        <div class="tel-aux" style="margin-top:5px">
+          <button id="appApprove" data-act="pick:approve" disabled style="font-weight:bold">&#10003; APPROVE PICK</button>
+          <button id="appSkip" data-act="pick:skip" disabled>&#10007; SKIP</button>
+        </div>
+      </div>
 
       <div class="tel-hint">
         <b>W/A/S/D</b> drive + strafe · <b>Q/E</b> turn · <b>I/K</b> arm reach · <b>J/L</b> arm left/right ·
@@ -1666,6 +1676,40 @@ document.querySelectorAll('.tel-aux button').forEach(b =>
     if (a === 'led') { telLed = !telLed; telAction('led:' + (telLed ? 255 : 0)); return; }
     telAction(a);
   }));
+
+/* --- pick approval panel ------------------------------------------- */
+let appSeen = 0;
+registerTopic({
+  name: '/pick/approval', type: 'std_msgs/String', throttle: 200,
+  handler: (m) => {
+    let r; try { r = JSON.parse(m.data); } catch (e) { return; }
+    appSeen = Date.now();
+    const w = !!r.waiting;
+    $('appApprove').disabled = !w;
+    $('appSkip').disabled = !w;
+    const st = $('appStatus');
+    if (w) {
+      st.innerHTML = '&#9888; PICK READY at (' + r.pick[0] + ',' + r.pick[1] +
+                     ') — check the wrist panel &middot; ' +
+                     Math.round(r.age) + 's';
+      st.style.color = 'var(--warn-txt)';
+      $('appPanel').style.borderColor = 'var(--warn)';
+    } else {
+      st.textContent = r.last ? ('last: ' + r.last.toUpperCase()) : 'no pick pending';
+      st.style.color = 'var(--muted)';
+      $('appPanel').style.borderColor = 'var(--line)';
+    }
+  }
+});
+setInterval(() => {
+  if (Date.now() - appSeen > 5000) {
+    $('appStatus').textContent = 'no pick pending';
+    $('appStatus').style.color = 'var(--muted)';
+    $('appPanel').style.borderColor = 'var(--line)';
+    $('appApprove').disabled = true;
+    $('appSkip').disabled = true;
+  }
+}, 2000);
 
 /* --- demo recorder panel ------------------------------------------- */
 let recSeen = 0;

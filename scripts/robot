@@ -172,6 +172,8 @@ def mode_pick(a):
     hov = hover_arg(a.hover)
     if hov is None and a.hover:
         return 2
+    if a.approve:
+        cmd += ' --approve'
     if a.wrist_detector == 'yolo':
         # hz proves data flows, but a fresh CLI subscriber can lose seconds
         # to DDS discovery -- fall back to a process check before failing
@@ -539,6 +541,9 @@ def main():
                    default='dino',
                    help='refine detector: dino (tunnel) or yolo '
                         '(on-device socks2)')
+    p.add_argument('--approve', action='store_true',
+                   help='operator approval gate: console APPROVE/SKIP '
+                        'before every grasp')
     p = sub.add_parser('pi')
     p.add_argument('--prompt', required=True)
     p.add_argument('--execute', action='store_true',

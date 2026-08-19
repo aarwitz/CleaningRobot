@@ -215,6 +215,47 @@ class PickPipeline(BallPick):
                 (box, 'claw', 0.0))
         return dark
 
+    def enable_approval(self):
+        """Operator pick-approval gate (2026-08-19): the operator prefers
+        approving scripted picks over teleoping them. Before any grasp the
+        pipeline publishes the planned pick and BLOCKS until the console
+        sends pick:approve / pick:skip (timeout = skip). Approved picks
+        execute + record; the human watching the claw is the label."""
+        from std_msgs.msg import String as _S
+        self._approval = None
+        self.approval_pub = self.create_publisher(_S, '/pick/approval', 2)
+
+        def _acb(m):
+            if m.data.strip() in ('pick:approve', 'pick:skip'):
+                self._approval = m.data.strip().split(':')[1]
+        self.create_subscription(_S, '/teleop/action', _acb, 10)
+        self.use_approval = True
+
+    def wait_approval(self, bx, by, timeout=120.0):
+        """Publish the pending pick at 2 Hz; return 'approve'/'skip'."""
+        from std_msgs.msg import String as _S
+        self._approval = None
+        t0 = time.time()
+        print(f'  [approve] pick at ({bx:.0f},{by:.0f}) awaiting operator '
+              f'(timeout {timeout:.0f}s)')
+        if self.wrist is not None:
+            self.publish_flywheel(self.wrist,
+                                  {'stage': 'AWAITING APPROVAL',
+                                   'label': 'planned pick',
+                                   'pick_arm': [round(bx), round(by)]},
+                                  cam='wrist')
+        while time.time() - t0 < timeout and self._approval is None:
+            self.approval_pub.publish(_S(data=json.dumps(
+                {'waiting': True, 'pick': [round(bx), round(by)],
+                 'age': round(time.time() - t0, 1)})))
+            self.spin(0.5)
+        got = self._approval or 'skip'
+        self.approval_pub.publish(_S(data=json.dumps(
+            {'waiting': False, 'last': got})))
+        print(f'  [approve] operator: {got.upper()}'
+              + (' (timeout)' if self._approval is None else ''))
+        return got
+
     def enable_wrist_yolo(self):
         """Subscribe to the on-device socks2 wrist detector (yolo_trt_py on
         /wrist_cam/image_raw). Replaces DINO in refine: no tunnel in the
@@ -1218,6 +1259,9 @@ def main():
                     default='dino',
                     help='refine/probe detector: dino (open-vocab, tunnel) or '
                          'yolo (on-device socks2 via /wrist_yolo/detections)')
+    ap.add_argument('--approve', action='store_true',
+                    help='block before every grasp until the operator sends '
+                         'pick:approve / pick:skip from the console')
     ap.add_argument('--drop-at', type=str, default=None,
                     help='"x,y" arm coords to release at instead of the pick '
                          'spot')
@@ -1230,6 +1274,10 @@ def main():
         c.enable_wrist_yolo()
         print('  [wrist-yolo] refine uses on-device socks2 '
               '(/wrist_yolo/detections)')
+    if a.approve:
+        c.enable_approval()
+        print('  [approve] operator approval gate ACTIVE -- no grasp '
+              'without a console approve')
 
     def _halt_trap(signum, _frm):
         # A killed batch script must NEVER leave the arm parked at its last
@@ -1396,13 +1444,33 @@ def main():
                     if wrist_px is not None:
                         break
             if wrist_px is None:
-                print('  [wrist-only] wrist cannot see the object -- skipping '
-                      '(no blind grasp at the nominal spot)')
-                miss_n += 1
-                if rec:
-                    rec.finish(False, {'object': a.object, 'note': 'no wrist det'})
-                    idx += 1
-                continue
+                # SCOUT-FALLBACK under the approval gate (2026-08-19): the
+                # old rule was "no wrist det -> no grasp" because nothing
+                # could sanity-check a scout-only pick. With --approve the
+                # OPERATOR is the check: propose the scout target (plus the
+                # measured head-projection bias, see 7d) and let the human
+                # decide. Without --approve the old refusal stands.
+                if getattr(c, 'use_approval', False) and scout_lock:
+                    sbx = scout_lock[0] + 62.0
+                    sby = scout_lock[1] + 66.0
+                    r_s = math.hypot(sbx, sby)
+                    if r_s > FLOOR_REACH_R:
+                        sbx, sby = (sbx * FLOOR_REACH_R / r_s,
+                                    sby * FLOOR_REACH_R / r_s)
+                    print(f'  [wrist-only] no wrist det -- proposing '
+                          f'SCOUT-ONLY pick at ({sbx:.0f},{sby:.0f}) '
+                          '(bias-corrected) for operator approval')
+                    bx, by = sbx, sby
+                    wrist_px = (0, 0)
+                else:
+                    print('  [wrist-only] wrist cannot see the object -- '
+                          'skipping (no blind grasp at the nominal spot)')
+                    miss_n += 1
+                    if rec:
+                        rec.finish(False, {'object': a.object,
+                                           'note': 'no wrist det'})
+                        idx += 1
+                    continue
             # converge on the LOCKED target: the initial full-cap pass fixed
             # which physical object we are picking (arm coords); later passes
             # only trim residual error on that same object
@@ -1453,6 +1521,17 @@ def main():
                         idx += 1
                     continue
         corr_mm = math.hypot(bx - bx0, by - by0) if wrist_px else None
+        if getattr(c, 'use_approval', False):
+            if c.wait_approval(bx, by) != 'approve':
+                print('  [approve] SKIPPED by operator -- no motion')
+                if rec:
+                    rec.finish(False, {'object': a.object,
+                                       'note': 'operator skipped at approval '
+                                               'gate; no grasp attempted',
+                                       'skipped': True})
+                    idx += 1
+                miss_n += 1
+                continue
         held = False
         try:
             if c.grasp(bx, by, a.strategy, rec=rec):

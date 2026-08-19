@@ -235,14 +235,20 @@ RADIALLY OUTWARD (r+22, z+12), which changes the elbow angle directly,
 and ESCALATES to r+45/z+35 if a second escape fires within 40 s.
 Never fires while the operator is actively commanding.
 
-**Residual exposure (known, accepted):** scripted pipelines pass through
-neutral poses transiently (no dwell → no cycle), and `robot halt`/the
-signal traps lift the arm on any abnormal script end. A script PAUSED
-mid-motion at a neutral pose (e.g. blocked on a dead DINO call) could
-still hunt until the call times out — the loud `DINO unreachable` prints
-plus bounded timeouts keep that window small. If shaking is ever seen
-OUTSIDE these bounds, capture `/teleop/state` torques first (§5b method)
-before assuming a new cause.
+**v3 (2026-08-19, after a THIRD live sighting during scripted ops):**
+the detector originally lived only in the operator-stream-alive branch of
+`_control_tick` — during scripted runs no cmd stream flows, that branch
+never executes, and a script that ENDED NORMALLY at a hover parked the
+arm in the neutral band with no guard running. Two fixes: (a) `_anti_hunt`
+is now called from BOTH control branches (no cmd stream == definitionally
+idle); (b) `pick_pipeline` tucks the arm on NORMAL exit too (traps already
+covered abnormal ends; --keep skips).
+
+**Remaining exposure:** a script PAUSED mid-motion at a neutral pose
+(e.g. blocked on a dead DINO call) can hunt until the call times out —
+bounded timeouts keep the window small, and the node-side guard now
+catches it after ~2 s regardless. If shaking is ever seen again, capture
+`/teleop/state` torques first (§5b method) before assuming a new cause.
 
 ## 6. Next steps, in priority order
 

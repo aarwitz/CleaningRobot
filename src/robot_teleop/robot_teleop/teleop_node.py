@@ -353,6 +353,38 @@ class TeleopNode(Node):
             self.arm.stop_all()
         self.cmd_vel_pub.publish(Twist())
 
+    def _anti_hunt(self):
+        """Detect + escape the elbow limit-cycle (HANDOFF 5b): at
+        gravity-neutral elbow poses (torE zero-crossing) backlash + the
+        gripper band spring make the firmware position-hold oscillate
+        ~10mm radially, forever. Watch fb-x peak-to-peak over 2s of idle;
+        sustained -> escape RADIALLY OUTWARD (the neutral band is tall in
+        z at inward radii; vertical escapes failed live). Escalate on a
+        repeat within 40s. Called from BOTH control branches -- scripted
+        operation has no cmd stream and is definitionally idle."""
+        fb = self.arm.last_fb or {}
+        if fb.get('x') is None or fb.get('z') is None:
+            return
+        now = time.time()
+        self._hunt_hist.append((now, fb['x']))
+        self._hunt_hist = [(t_, x_) for t_, x_ in self._hunt_hist
+                           if now - t_ < 2.0]
+        xs = [x_ for _, x_ in self._hunt_hist]
+        if (len(xs) > 20 and max(xs) - min(xs) > 6.0
+                and now - self._hunt_last_escape > 10.0):
+            again = now - self._hunt_last_escape < 40.0
+            dx, dz = (45.0, 35.0) if again else (22.0, 12.0)
+            self._hunt_last_escape = now
+            self._hunt_hist.clear()
+            self.get_logger().warn(
+                'anti-hunt: idle limit-cycle '
+                f'(x pp={max(xs)-min(xs):.1f}mm) -> escape '
+                f'{"ESCALATED " if again else ""}r+{dx:.0f} z+{dz:.0f}')
+            r = math.hypot(fb['x'], fb.get('y', 0.0)) or 1.0
+            self.arm.goto(fb['x'] * (r + dx) / r,
+                          fb.get('y', 0.0) * (r + dx) / r,
+                          fb['z'] + dz, fb.get('t', 2.0))
+
     def _control_tick(self):
         dt = 1.0 / self.rate
         with self._lock:
@@ -370,6 +402,13 @@ class TeleopNode(Node):
             if changed and self.arm_ok:
                 self.arm.stop_all()
             self.cmd_vel_pub.publish(Twist())
+            # Anti-hunt MUST run here too (2026-08-19, second live sighting):
+            # during SCRIPTED operation no operator stream flows, this branch
+            # runs every tick, and the in-branch detector below was dead code
+            # -- a script that exited leaving the arm in the neutral band
+            # hunted indefinitely. No cmd stream == definitionally idle.
+            if not estop and self.arm_ok:
+                self._anti_hunt()
             return
 
         arm_spd, lin_spd, yaw_spd = self._speeds()
@@ -386,43 +425,11 @@ class TeleopNode(Node):
         self.v['bw'] = ramp(self.v['bw'], want['bw'] * yaw_spd, w_acc, dt)
 
         if self.arm_ok:
-            # ── anti-hunt (2026-08-19): at gravity-neutral elbow poses the
-            # firmware's position hold limit-cycles (torE swings through
-            # zero; fb x oscillates ~10mm; operator saw "reaching in/out").
-            # With ZERO operator intent, watch fb x peak-to-peak over ~2s;
-            # sustained oscillation -> one goto 18mm up to move the elbow
-            # off its torque zero-crossing. Never fires while driving.
             idle = all(abs(want[k]) < 1e-6
                        for k in ('ax', 'ay', 'az', 'grip'))
-            fb = self.arm.last_fb or {}
-            if idle and fb.get('x') is not None:
-                now = time.time()
-                self._hunt_hist.append((now, fb['x']))
-                self._hunt_hist = [(t_, x_) for t_, x_ in self._hunt_hist
-                                   if now - t_ < 2.0]
-                xs = [x_ for _, x_ in self._hunt_hist]
-                if (len(xs) > 20 and max(xs) - min(xs) > 6.0
-                        and now - self._hunt_last_escape > 10.0
-                        and fb.get('z') is not None):
-                    # Escape RADIALLY OUTWARD (+z secondary): the neutral
-                    # torque band is TALL at inward radii -- three vertical
-                    # +18mm escapes in 30s never left it (torE stayed ~0,
-                    # cycle re-established each time; live 2026-08-19).
-                    # Moving r changes the elbow angle directly. Escalate
-                    # on repeats within 40s.
-                    again = now - self._hunt_last_escape < 40.0
-                    dx, dz = (45.0, 35.0) if again else (22.0, 12.0)
-                    self._hunt_last_escape = now
-                    self._hunt_hist.clear()
-                    self.get_logger().warn(
-                        'anti-hunt: idle limit-cycle '
-                        f'(x pp={max(xs)-min(xs):.1f}mm) -> escape '
-                        f'{"ESCALATED " if again else ""}r+{dx:.0f} z+{dz:.0f}')
-                    r = math.hypot(fb['x'], fb.get('y', 0.0)) or 1.0
-                    self.arm.goto(fb['x'] * (r + dx) / r,
-                                  fb.get('y', 0.0) * (r + dx) / r,
-                                  fb['z'] + dz, fb.get('t', 2.0))
-            elif not idle:
+            if idle:
+                self._anti_hunt()
+            else:
                 self._hunt_hist.clear()
             sx, sy, sz = self._limit_scale(self.v['ax'], self.v['ay'], self.v['az'])
             self.arm.jog(AXIS_X, self.v['ax'] * sx)
